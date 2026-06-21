@@ -733,7 +733,7 @@ def redact_file_content(content: str, sensitive_words=None) -> str:
         
     return "".join(chars)
 
-def redact_file_in_place(filepath: str, sensitive_words=None) -> bool:
+def redact_file_in_place(filepath: str, sensitive_words=None, dryrun=False) -> bool:
     try:
         path = Path(filepath)
         if not path.exists():
@@ -744,6 +744,24 @@ def redact_file_in_place(filepath: str, sensitive_words=None) -> bool:
             return False
             
         content = path.read_text(encoding="utf-8", errors="ignore")
+        if dryrun:
+            print(f"\n[DRY RUN] Analyzing file {filepath} for secrets/PII to redact...")
+            findings = scan_snippet(content, filepath, sensitive_words=sensitive_words)
+            total = len(findings["secrets"]) + len(findings["pii"]) + len(findings["entropy"])
+            if total > 0:
+                print(f"[DRY RUN] Found {total} item(s) that would be redacted:")
+                for s in findings["secrets"]:
+                    print(f"  - SECRET: {s['type']} at line {s['line']} (value: {s['match']})")
+                for p in findings["pii"]:
+                    print(f"  - PII: {p['type']} at line {p['line']} (value: {p['match']})")
+                for e in findings["entropy"]:
+                    print(f"  - HIGH ENTROPY TOKEN: at line {e['line']} (value: {e['token']})")
+                print(f"[DRY RUN] File {filepath} would be modified (backup would be saved).")
+                return False
+            else:
+                print(f"[DRY RUN] No secrets, PII, or high-entropy tokens detected in {filepath}.")
+                return True
+
         redacted = redact_file_content(content, sensitive_words)
         
         backup_path = path.with_suffix(path.suffix + ".bak")
@@ -1061,6 +1079,103 @@ def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=No
                     findings["nlp_pii"].append(p)
 
     return findings
+
+def run_dryrun_repo_scan(repo_dir: str, exclude_patterns: list, scan_submodules=False, all_branches=False, reflog=False):
+    import os
+    import subprocess
+    from pathlib import Path
+    
+    print("\033[1;36m============================================================\033[0m")
+    print("\033[1;36m  DRY RUN: SECRET SCANNER AUDIT REPORT\033[0m")
+    print("\033[1;36m============================================================\033[0m")
+    print("This mode simulates the scan, listing all files and commit histories that would be scanned.\n")
+    
+    def get_scan_files(target_dir, prefix=""):
+        scan_files = []
+        suspicious = []
+        for root_dir, dirs, files in os.walk(target_dir):
+            if '.git' in dirs:
+                dirs.remove('.git')
+            try:
+                rel_root = os.path.relpath(root_dir, target_dir)
+            except Exception:
+                rel_root = "."
+            if rel_root == ".":
+                rel_root = ""
+
+            active_dirs = []
+            for d in dirs:
+                dir_rel = os.path.join(rel_root, d).replace("\\", "/")
+                if match_exclude(dir_rel, exclude_patterns) or match_exclude(dir_rel + "/", exclude_patterns):
+                    continue
+                active_dirs.append(d)
+            dirs[:] = active_dirs
+
+            for file in files:
+                file_rel = os.path.join(rel_root, file).replace("\\", "/")
+                if match_exclude(file_rel, exclude_patterns):
+                    continue
+                
+                full_rel = f"{prefix}{file_rel}" if prefix else file_rel
+                scan_files.append(full_rel)
+                
+                # Check suspicious file names
+                for glob_pat in GITROB_SUSPICIOUS_FILES:
+                    from fnmatch import fnmatch
+                    if fnmatch(file, glob_pat) or fnmatch(file_rel, glob_pat):
+                        suspicious.append(full_rel)
+                        break
+        return scan_files, suspicious
+
+    files_to_scan, suspicious_files = get_scan_files(repo_dir)
+    print(f"Working Tree Scan Plan:")
+    print(f"  - Total files to scan: {len(files_to_scan)}")
+    if suspicious_files:
+        print(f"  - Suspicious file names detected ({len(suspicious_files)}):")
+        for f in suspicious_files[:10]:
+            print(f"    * {f}")
+        if len(suspicious_files) > 10:
+            print(f"    * ... and {len(suspicious_files) - 10} more")
+            
+    if scan_submodules:
+        submodules = get_submodules(repo_dir)
+        for sub in submodules:
+            sub_dir = Path(repo_dir) / sub
+            if sub_dir.exists():
+                sub_files, sub_susp = get_scan_files(str(sub_dir), prefix=f"{sub}/")
+                print(f"  - Submodule '{sub}' recursive files to scan: {len(sub_files)}")
+                if sub_susp:
+                    print(f"    * Suspicious file names in '{sub}' ({len(sub_susp)}):")
+                    for sf in sub_susp[:5]:
+                        print(f"      - {sf}")
+
+    print(f"\nGit History Scan Plan:")
+    def get_commit_count(cwd, all_br=False):
+        try:
+            cmd = ["git", "rev-list", "--count", "HEAD"]
+            if all_br:
+                cmd = ["git", "rev-list", "--count", "--all"]
+            res = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+            if res.returncode == 0:
+                return int(res.stdout.strip())
+        except Exception:
+            pass
+        return 0
+
+    main_commits = get_commit_count(repo_dir, all_branches)
+    print(f"  - Main repository commits to scan: {main_commits}{' (all branches)' if all_branches else ' (active branch)'}")
+    if reflog:
+        print(f"  - Reflog scan: ENABLED (would search reflog history for leaks)")
+        
+    if scan_submodules:
+        submodules = get_submodules(repo_dir)
+        for sub in submodules:
+            sub_dir = Path(repo_dir) / sub
+            if sub_dir.exists():
+                sub_commits = get_commit_count(str(sub_dir), all_branches)
+                print(f"  - Submodule '{sub}' commits to scan: {sub_commits}")
+
+    print("\nDry-Run complete. No files were modified and no contents were scanned.")
 
 # ------------------------------------------------------------------------------
 # Report generation
@@ -1955,13 +2070,14 @@ if __name__ == "__main__":
     parser.add_argument("--redact-file", help="Redact all secrets and PII from a local file in-place")
     parser.add_argument("--submodules", action="store_true", help="Scan submodules recursively in working tree and history")
     parser.add_argument("--presidio", action="store_true", help="Enable Microsoft Presidio NLP scanning for PII")
+    parser.add_argument("--dryrun", "--dry-run", action="store_true", help="Perform a dry run: print what would be scanned/redacted without doing it")
     args = parser.parse_args()
 
     if args.redact_file:
         sensitive_words = []
         if args.sensitive_words:
             sensitive_words = [w.strip() for w in args.sensitive_words.split(",") if w.strip()]
-        success = redact_file_in_place(args.redact_file, sensitive_words)
+        success = redact_file_in_place(args.redact_file, sensitive_words, dryrun=args.dryrun)
         sys.exit(0 if success else 1)
 
     if args.tui:
@@ -2021,6 +2137,15 @@ fi
             content = args.text
             source = "text_snippet"
 
+        if args.dryrun:
+            print("\033[1;36m============================================================\033[0m")
+            print("\033[1;36m  DRY RUN: TEXT SNIPPET SCAN\033[0m")
+            print("\033[1;36m============================================================\033[0m")
+            print(f"This mode simulates scanning the input text snippet from {source}.\n")
+            print(f"Text length: {len(content)} characters.")
+            print("Dry-run complete. No contents were actually audited for secrets.")
+            sys.exit(0)
+
         snippet_findings = scan_snippet(content, source, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens, extract_code_blocks=args.extract_code_blocks, sensitive_words=sensitive_words, presidio_analyzer=presidio_analyzer)
         
         # Format snippet findings to match generate_report expected structure
@@ -2056,6 +2181,10 @@ fi
     ]
     # Add files from .secretsignore to exclusion list
     EXCLUDE_PATTERNS.extend(ignore_files)
+
+    if args.dryrun:
+        run_dryrun_repo_scan(repo_dir, EXCLUDE_PATTERNS, scan_submodules=args.submodules, all_branches=args.all_branches, reflog=args.reflog)
+        sys.exit(0)
 
     history_findings = scan_history(EXCLUDE_PATTERNS, args.all_branches, quiet=args.quiet, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words, since=args.since, scan_submodules=args.submodules)
     if args.reflog:
