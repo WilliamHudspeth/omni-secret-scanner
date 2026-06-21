@@ -55,6 +55,9 @@ CUSTOM_SECRET_PATTERNS = {
     "Cloudflare API Key": r"[a-zA-Z0-9_\-]{40}",
     "Snowflake Password": r"(?i)snowflake.*password.*['\"][^'\"]+['\"]",
     "Datadog API Key": r"(?i)datadog.*['\"][a-f0-9]{32}['\"]",
+    "Docker Password/Token": r"(?i)ENV\s+\w*(?:PASSWORD|PASS|SECRET|KEY|TOKEN|AUTH)\w*\s*=\s*['\"].*?['\"]",
+    "Kubernetes Config Secret": r"(?i)(?:client-certificate-data\s*:\s*[A-Za-z0-9+/]{40,}=*|client-key-data\s*:\s*[A-Za-z0-9+/]{40,}=*)",
+    "Terraform Hardcoded Credential": r"(?i)(?:aws_access_key|aws_secret_key|token|password|secret|api_key)\s*=\s*['\"].*?['\"]",
 }
 
 CUSTOM_PII_PATTERNS = {
@@ -154,6 +157,26 @@ def redact_match(match_str: str) -> str:
             return f"{prefix}[REDACTED]"
     return f"{match_str[:4]}[REDACTED]"
 
+def get_submodules(repo_dir: str) -> list:
+    import subprocess
+    from pathlib import Path
+    submodules = []
+    if not (Path(repo_dir) / ".gitmodules").exists():
+        return submodules
+    try:
+        result = subprocess.run(["git", "submodule", "status"], cwd=repo_dir, capture_output=True, text=True, errors="replace")
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    submodules.append(parts[1])
+    except Exception:
+        pass
+    return submodules
+
+def get_line_number_from_offset(text: str, offset: int) -> int:
+    return text[:offset].count('\n') + 1
+
 def load_secretsignore(repo_dir: str):
     ignore_files = []
     ignore_tokens = []
@@ -234,7 +257,7 @@ def scan_obfuscated_secrets(text: str, source_identifier: str, all_secret_patter
             pass
     return local_hits
 
-def scan_snippet(content: str, source_name: str, entropy_threshold=3.8, ignore_tokens=None, extract_code_blocks=False, sensitive_words=None) -> dict:
+def scan_snippet(content: str, source_name: str, entropy_threshold=3.8, ignore_tokens=None, extract_code_blocks=False, sensitive_words=None, presidio_analyzer=None) -> dict:
     if ignore_tokens is None:
         ignore_tokens = []
     if sensitive_words is None:
@@ -320,6 +343,21 @@ def scan_snippet(content: str, source_name: str, entropy_threshold=3.8, ignore_t
                     "entropy": round(entropy, 2)
                 })
                 
+    if presidio_analyzer:
+        try:
+            results = presidio_analyzer.analyze(text=content, language="en")
+            for res in results:
+                val = content[res.start:res.end]
+                if val not in ignore_tokens:
+                    findings["pii"].append({
+                        "type": f"Presidio:{res.entity_type}",
+                        "file": source_name,
+                        "line": get_line_number_from_offset(content, res.start),
+                        "match": val
+                    })
+        except Exception:
+            pass
+            
     return findings
 
 def match_exclude(path: str, exclude_patterns: list) -> bool:
@@ -351,14 +389,14 @@ def extract_added_lines(patch_text: str, exclude_patterns: list) -> list:
                 line_no += 1
     return records
 
-def scan_commit_messages(all_branches=False):
+def scan_commit_messages(all_branches=False, repo_cwd=None):
     cmd = ["git", "log", "--pretty=format:%H%n%B%n---END---"]
     if all_branches:
         cmd.insert(2, "--all")
-    result = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+    result = subprocess.run(cmd, cwd=repo_cwd, capture_output=True, text=True, errors="replace")
     if result.returncode != 0:
         print("Error running git log for commits", file=sys.stderr)
-        sys.exit(1)
+        return
     commits = result.stdout.split("---END---\n")
     for block in commits:
         if not block.strip():
@@ -368,7 +406,7 @@ def scan_commit_messages(all_branches=False):
             commit_hash, message = parts
             yield commit_hash.strip(), message.strip()
 
-def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entropy_threshold=3.8, ignore_tokens=None, sensitive_words=None, since=None) -> dict:
+def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entropy_threshold=3.8, ignore_tokens=None, sensitive_words=None, since=None, scan_submodules=False, repo_cwd=None) -> dict:
     if ignore_tokens is None:
         ignore_tokens = []
     if sensitive_words is None:
@@ -381,7 +419,9 @@ def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entrop
     }
     
     # Check if .git exists to avoid failure if running outside git
-    if not Path(".git").exists() and not Path("../.git").exists():
+    git_dir = Path(repo_cwd) / ".git" if repo_cwd else Path(".git")
+    parent_git_dir = Path(repo_cwd) / "../.git" if repo_cwd else Path("../.git")
+    if not git_dir.exists() and not parent_git_dir.exists():
         if not quiet:
             print("Warning: Not running inside a Git repository. Skipping history scan.", file=sys.stderr)
         return findings
@@ -398,6 +438,7 @@ def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entrop
         cmd.append("--all")
     result = subprocess.run(
         cmd,
+        cwd=repo_cwd,
         capture_output=True, text=True, errors="replace"
     )
     if result.returncode != 0:
@@ -454,7 +495,7 @@ def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entrop
 
     if not quiet:
         print("Scanning commit messages...", file=sys.stderr)
-    for commit_hash, message in scan_commit_messages(all_branches):
+    for commit_hash, message in scan_commit_messages(all_branches, repo_cwd=repo_cwd):
         for name, pattern in all_secret_patterns.items():
             for m in re.finditer(pattern, message):
                 val = m.group(0).strip()
@@ -491,6 +532,37 @@ def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entrop
             entropy = shannon_entropy(token)
             if entropy >= entropy_threshold:
                 findings["commits"].append({"type": "ENTROPY", "commit": commit_hash[:8], "token": token, "entropy": round(entropy, 2)})
+
+    if scan_submodules:
+        submodules = get_submodules(repo_cwd)
+        for sub in submodules:
+            sub_dir = Path(repo_cwd) / sub if repo_cwd else Path(sub)
+            if sub_dir.exists():
+                if not quiet:
+                    print(f"Scanning submodule history: {sub}...", file=sys.stderr)
+                sub_history = scan_history(
+                    exclude_patterns=exclude_patterns,
+                    all_branches=all_branches,
+                    quiet=quiet,
+                    entropy_threshold=entropy_threshold,
+                    ignore_tokens=ignore_tokens,
+                    sensitive_words=sensitive_words,
+                    since=since,
+                    scan_submodules=True,
+                    repo_cwd=str(sub_dir)
+                )
+                for s in sub_history["secrets"]:
+                    s["file"] = f"{sub}/{s['file']}"
+                    findings["secrets"].append(s)
+                for p in sub_history["pii"]:
+                    p["file"] = f"{sub}/{p['file']}"
+                    findings["pii"].append(p)
+                for e in sub_history["entropy"]:
+                    e["file"] = f"{sub}/{e['file']}"
+                    findings["entropy"].append(e)
+                for c in sub_history["commits"]:
+                    c["commit"] = f"{sub}:{c['commit']}"
+                    findings["commits"].append(c)
 
     return findings
 
@@ -706,6 +778,17 @@ def init_nlp_deidentifier(quiet=False):
             print("Please ensure the spaCy model is downloaded: python -m spacy download en_core_web_sm", file=sys.stderr)
         return None
 
+def init_presidio_analyzer(quiet=False):
+    try:
+        from presidio_analyzer import AnalyzerEngine
+        analyzer = AnalyzerEngine()
+        return analyzer
+    except ImportError:
+        if not quiet:
+            print("Warning: The 'presidio-analyzer' package is not installed. Presidio NLP scanning will be skipped.", file=sys.stderr)
+            print("Please install it by running: pip install presidio-analyzer", file=sys.stderr)
+        return None
+
 def run_ps_crosscheck(repo_dir: str, quiet=False, ignore_tokens=None):
     import shutil
     import tempfile
@@ -796,7 +879,7 @@ $findings | ConvertTo-Json -Compress
         except Exception:
             pass
 
-def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=None, quiet=False, ignore_tokens=None, sensitive_words=None, extract_code_blocks=False) -> dict:
+def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=None, quiet=False, ignore_tokens=None, sensitive_words=None, extract_code_blocks=False, scan_submodules=False, presidio_analyzer=None) -> dict:
     if ignore_tokens is None:
         ignore_tokens = []
     if sensitive_words is None:
@@ -939,6 +1022,43 @@ def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=No
                                 findings["nlp_pii"].append({"file": file_rel_path, "type": "PRONOUN", "match": pron["text"]})
                     except Exception:
                         pass
+
+                # Presidio NLP PII scanning
+                if presidio_analyzer and path.suffix in ['.txt', '.md', '.csv', '.json', '.yml', '.yaml', '.py', '.tf', 'Dockerfile']:
+                    try:
+                        results = presidio_analyzer.analyze(text=content, language="en")
+                        for res in results:
+                            val = content[res.start:res.end]
+                            if val not in ignore_tokens:
+                                findings["current_secrets"].append({
+                                    "type": f"Presidio:{res.entity_type}",
+                                    "file": file_rel_path,
+                                    "line": get_line_number_from_offset(content, res.start),
+                                    "match": val
+                                })
+                    except Exception:
+                        pass
+
+    if scan_submodules:
+        submodules = get_submodules(repo_dir)
+        for sub in submodules:
+            sub_dir = Path(repo_dir) / sub
+            if sub_dir.exists():
+                if not quiet:
+                    print(f"Scanning submodule current tree: {sub}...", file=sys.stderr)
+                sub_findings = scan_current_tree(
+                    str(sub_dir), exclude_patterns, nlp_deidentifier,
+                    quiet=quiet, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words,
+                    extract_code_blocks=extract_code_blocks, scan_submodules=True, presidio_analyzer=presidio_analyzer
+                )
+                for s in sub_findings["current_secrets"]:
+                    s["file"] = f"{sub}/{s['file']}"
+                    findings["current_secrets"].append(s)
+                for f_name in sub_findings["suspicious_files"]:
+                    findings["suspicious_files"].append(f"{sub}/{f_name}")
+                for p in sub_findings["nlp_pii"]:
+                    p["file"] = f"{sub}/{p['file']}"
+                    findings["nlp_pii"].append(p)
 
     return findings
 
@@ -1526,6 +1646,8 @@ def configure_settings_menu(state):
             f"Extract Code Blocks: [{'ENABLED' if state['extract_code_blocks'] else 'DISABLED'}]",
             f"Enable Reflog Scan: [{'ENABLED' if state['reflog'] else 'DISABLED'}]",
             f"Since Limit: [{state['since'] if state['since'] else '(all)'}]",
+            f"Scan Submodules: [{'ENABLED' if state.get('submodules', False) else 'DISABLED'}]",
+            f"Enable Presidio NLP: [{'ENABLED' if state.get('presidio', False) else 'DISABLED'}]",
             "Go Back to Main Menu"
         ]
         menu_picker("SETTINGS CONFIGURATION", options, selected)
@@ -1570,6 +1692,10 @@ def configure_settings_menu(state):
                 val = input(f"Enter new Since Limit (e.g. HEAD~3, 2026-06-01, empty for all; current: {state['since'] or '(all)'}): ").strip()
                 state['since'] = val if val else None
             elif selected == 9:
+                state['submodules'] = not state.get('submodules', False)
+            elif selected == 10:
+                state['presidio'] = not state.get('presidio', False)
+            elif selected == 11:
                 break
 
 def run_tui_repo_scan(state):
@@ -1594,13 +1720,18 @@ def run_tui_repo_scan(state):
         print("Initializing NLP Engine...")
         nlp_deidentifier = init_nlp_deidentifier(quiet=True)
         
+    presidio_analyzer = None
+    if state.get("presidio", False):
+        print("Initializing Presidio NLP Engine...")
+        presidio_analyzer = init_presidio_analyzer(quiet=True)
+        
     ps_findings = []
     if state["ps_crosscheck"]:
         print("Running PowerShell Crosscheck...")
         ps_findings = run_ps_crosscheck(state["repo_dir"], quiet=True, ignore_tokens=ignore_tokens)
         
     print("Scanning Git history...")
-    history_findings = scan_history(EXCLUDE_PATTERNS, all_branches=False, quiet=True, entropy_threshold=state["entropy_threshold"], ignore_tokens=ignore_tokens, sensitive_words=state["sensitive_words"], since=state["since"])
+    history_findings = scan_history(EXCLUDE_PATTERNS, all_branches=False, quiet=True, entropy_threshold=state["entropy_threshold"], ignore_tokens=ignore_tokens, sensitive_words=state["sensitive_words"], since=state["since"], scan_submodules=state.get("submodules", False))
     if state["reflog"]:
         print("Scanning Git reflog history...")
         reflog_findings = scan_reflog(EXCLUDE_PATTERNS, quiet=True, entropy_threshold=state["entropy_threshold"], ignore_tokens=ignore_tokens, sensitive_words=state["sensitive_words"])
@@ -1609,7 +1740,7 @@ def run_tui_repo_scan(state):
         history_findings["entropy"].extend(reflog_findings["entropy"])
         
     print("Scanning current files...")
-    tree_findings = scan_current_tree(state["repo_dir"], EXCLUDE_PATTERNS, nlp_deidentifier, quiet=True, ignore_tokens=ignore_tokens, sensitive_words=state["sensitive_words"], extract_code_blocks=state["extract_code_blocks"])
+    tree_findings = scan_current_tree(state["repo_dir"], EXCLUDE_PATTERNS, nlp_deidentifier, quiet=True, ignore_tokens=ignore_tokens, sensitive_words=state["sensitive_words"], extract_code_blocks=state["extract_code_blocks"], scan_submodules=state.get("submodules", False), presidio_analyzer=presidio_analyzer)
     
     print("Compiling findings...")
     findings = flatten_findings(history_findings, tree_findings, ps_findings)
@@ -1675,8 +1806,12 @@ def run_tui_snippet_scan(state):
     clear_screen()
     print("Scanning text snippet...")
     
+    presidio_analyzer = None
+    if state.get("presidio", False):
+        presidio_analyzer = init_presidio_analyzer(quiet=True)
+
     ignore_files, ignore_tokens = load_secretsignore(state["repo_dir"])
-    snippet_findings = scan_snippet(content, "text_snippet", entropy_threshold=state["entropy_threshold"], ignore_tokens=ignore_tokens, extract_code_blocks=state["extract_code_blocks"], sensitive_words=state["sensitive_words"])
+    snippet_findings = scan_snippet(content, "text_snippet", entropy_threshold=state["entropy_threshold"], ignore_tokens=ignore_tokens, extract_code_blocks=state["extract_code_blocks"], sensitive_words=state["sensitive_words"], presidio_analyzer=presidio_analyzer)
     
     history_findings = {
         "secrets": snippet_findings["secrets"],
@@ -1750,7 +1885,9 @@ def run_tui(args):
         "nlp_pii": args.nlp_pii,
         "ps_crosscheck": args.ps_crosscheck,
         "reflog": args.reflog,
-        "since": args.since
+        "since": args.since,
+        "submodules": args.submodules,
+        "presidio": args.presidio
     }
     
     selected = 0
@@ -1816,6 +1953,8 @@ if __name__ == "__main__":
     parser.add_argument("--since", help="Incremental scan start commit/date (e.g. HEAD~3, 2026-06-01)")
     parser.add_argument("--reflog", action="store_true", help="Scan git reflog for force-pushed commits")
     parser.add_argument("--redact-file", help="Redact all secrets and PII from a local file in-place")
+    parser.add_argument("--submodules", action="store_true", help="Scan submodules recursively in working tree and history")
+    parser.add_argument("--presidio", action="store_true", help="Enable Microsoft Presidio NLP scanning for PII")
     args = parser.parse_args()
 
     if args.redact_file:
@@ -1867,6 +2006,11 @@ fi
     if args.sensitive_words:
         sensitive_words = [w.strip() for w in args.sensitive_words.split(",") if w.strip()]
 
+    # Initialize Presidio Analyzer
+    presidio_analyzer = None
+    if args.presidio:
+        presidio_analyzer = init_presidio_analyzer(quiet=args.quiet)
+
     # Snippet / Stdin scan mode
     if args.stdin or args.text:
         content = ""
@@ -1877,7 +2021,7 @@ fi
             content = args.text
             source = "text_snippet"
 
-        snippet_findings = scan_snippet(content, source, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens, extract_code_blocks=args.extract_code_blocks, sensitive_words=sensitive_words)
+        snippet_findings = scan_snippet(content, source, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens, extract_code_blocks=args.extract_code_blocks, sensitive_words=sensitive_words, presidio_analyzer=presidio_analyzer)
         
         # Format snippet findings to match generate_report expected structure
         history_findings = {
@@ -1913,14 +2057,14 @@ fi
     # Add files from .secretsignore to exclusion list
     EXCLUDE_PATTERNS.extend(ignore_files)
 
-    history_findings = scan_history(EXCLUDE_PATTERNS, args.all_branches, quiet=args.quiet, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words, since=args.since)
+    history_findings = scan_history(EXCLUDE_PATTERNS, args.all_branches, quiet=args.quiet, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words, since=args.since, scan_submodules=args.submodules)
     if args.reflog:
         reflog_findings = scan_reflog(EXCLUDE_PATTERNS, quiet=args.quiet, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words)
         history_findings["secrets"].extend(reflog_findings["secrets"])
         history_findings["pii"].extend(reflog_findings["pii"])
         history_findings["entropy"].extend(reflog_findings["entropy"])
         
-    tree_findings = scan_current_tree(repo_dir, EXCLUDE_PATTERNS, nlp_deidentifier, quiet=args.quiet, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words, extract_code_blocks=args.extract_code_blocks)
+    tree_findings = scan_current_tree(repo_dir, EXCLUDE_PATTERNS, nlp_deidentifier, quiet=args.quiet, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words, extract_code_blocks=args.extract_code_blocks, scan_submodules=args.submodules, presidio_analyzer=presidio_analyzer)
     
     total_issues = generate_report(history_findings, tree_findings, ps_findings, args.output, args.format, mask=args.mask, context_lines=args.context_lines, show_score=args.confidence_score)
 
