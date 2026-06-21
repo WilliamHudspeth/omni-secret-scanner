@@ -3,3 +3,6 @@ __pycache__/
 report.txt
 scan_report.txt
 .env
+
+# Omni-Secret-Scanner filter-repo replacements
+replacements.txt

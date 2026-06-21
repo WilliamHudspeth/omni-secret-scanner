@@ -11,6 +11,14 @@ Combines:
 Usage:
     python scan-secrets.py [--repo-dir /path/to/repo] [--output report.txt] [--nlp-pii] [--ps-crosscheck]
 
+Optional Dependencies & Setup:
+    - `text-deidentification` (for NLP PII scanning):
+        pip install text-deidentification
+    - `spaCy` English model (required by text-deidentification):
+        python -m spacy download en_core_web_sm
+    - `powershell` or `pwsh` (PowerShell Core) (for OS-level cross-checking):
+        Ensure 'pwsh' or 'powershell' is installed and available in your system's PATH.
+
 Requirements:
     - Python 3.6+
     - Git installed and available in PATH
@@ -53,7 +61,7 @@ CUSTOM_PII_PATTERNS = {
     "Email Address": r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
     "Phone Number (US)": r"\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}",
     # Upgraded SSN Regex via User's PowerShell cross-check recommendation
-    "SSN (US)": r"(?!(000|666|9))\d{3}-(?!00)\d{2}-(?!0000)\d{4}",
+    "SSN (US)": r"(?!000|666|9\d{2})\d{3}[-\s]?(?!00)\d{2}[-\s]?(?!0000)\d{4}",
     "Street Address (simple)": r"\d{1,5}\s[A-Za-z0-9\s]+(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Court|Ct)\b",
     "Zip Code (US)": r"\b\d{5}(-\d{4})?\b",
 }
@@ -118,6 +126,25 @@ def shannon_entropy(data: str) -> float:
     prob = [float(data.count(c)) / len(data) for c in set(data)]
     return -sum(p * math.log2(p) for p in prob)
 
+def is_ignored_entropy_token(token: str) -> bool:
+    # 1. UUID check
+    if re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", token):
+        return True
+    # 2. Base64-like pattern check (24+ characters of A-Z, a-z, 0-9, +, /, maybe ending with =)
+    if re.match(r"^[A-Za-z0-9+/]{24,}={0,2}$", token):
+        return True
+    return False
+
+def redact_match(match_str: str) -> str:
+    if not match_str:
+        return "[REDACTED]"
+    if len(match_str) <= 4:
+        return "[REDACTED]"
+    for prefix in ["AKIA", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "hf_", "gsk_", "pplx-", "sk-ant-", "sk-proj-", "sk-", "nvapi-", "sbp_"]:
+        if match_str.startswith(prefix):
+            return f"{prefix}[REDACTED]"
+    return f"{match_str[:4]}[REDACTED]"
+
 def match_exclude(path: str, exclude_patterns: list) -> bool:
     from fnmatch import fnmatch
     for pat in exclude_patterns:
@@ -164,7 +191,7 @@ def scan_commit_messages(all_branches=False):
             commit_hash, message = parts
             yield commit_hash.strip(), message.strip()
 
-def scan_history(exclude_patterns: list, all_branches=False) -> dict:
+def scan_history(exclude_patterns: list, all_branches=False, quiet=False) -> dict:
     findings = {
         "secrets": [],
         "pii": [],
@@ -174,10 +201,12 @@ def scan_history(exclude_patterns: list, all_branches=False) -> dict:
     
     # Check if .git exists to avoid failure if running outside git
     if not Path(".git").exists() and not Path("../.git").exists():
-        print("Warning: Not running inside a Git repository. Skipping history scan.", file=sys.stderr)
+        if not quiet:
+            print("Warning: Not running inside a Git repository. Skipping history scan.", file=sys.stderr)
         return findings
 
-    print(f"Scanning file history{' (all branches)' if all_branches else ''}...", file=sys.stderr)
+    if not quiet:
+        print(f"Scanning file history{' (all branches)' if all_branches else ''}...", file=sys.stderr)
     cmd = ["git", "log", "-p", "--no-color"]
     if all_branches:
         cmd.insert(2, "--all")
@@ -186,7 +215,8 @@ def scan_history(exclude_patterns: list, all_branches=False) -> dict:
         capture_output=True, text=True, errors="replace"
     )
     if result.returncode != 0:
-        print("Fatal: not a git repository or git error", file=sys.stderr)
+        if not quiet:
+            print("Fatal: not a git repository or git error", file=sys.stderr)
         return findings
 
     added_lines = extract_added_lines(result.stdout, exclude_patterns)
@@ -207,11 +237,13 @@ def scan_history(exclude_patterns: list, all_branches=False) -> dict:
             token = m.group(0)
             if token.isdigit(): continue
             if all(c in "0123456789abcdefABCDEF" for c in token) and len(token) in (32, 40): continue
+            if is_ignored_entropy_token(token): continue
             entropy = shannon_entropy(token)
             if entropy > 3.8:
                 findings["entropy"].append({"file": file_path, "line": line_no, "token": token, "entropy": round(entropy, 2)})
 
-    print("Scanning commit messages...", file=sys.stderr)
+    if not quiet:
+        print("Scanning commit messages...", file=sys.stderr)
     for commit_hash, message in scan_commit_messages(all_branches):
         for name, pattern in all_secret_patterns.items():
             for m in re.finditer(pattern, message):
@@ -223,6 +255,7 @@ def scan_history(exclude_patterns: list, all_branches=False) -> dict:
         for m in candidates:
             token = m.group(0)
             if token.isdigit(): continue
+            if is_ignored_entropy_token(token): continue
             entropy = shannon_entropy(token)
             if entropy > 3.8:
                 findings["commits"].append({"type": "ENTROPY", "commit": commit_hash[:8], "token": token, "entropy": round(entropy, 2)})
@@ -260,34 +293,53 @@ def scan_ipynb(path, all_secret_patterns):
 # NLP & PowerShell Integrations
 # ------------------------------------------------------------------------------
 
-def init_nlp_deidentifier():
+def init_nlp_deidentifier(quiet=False):
     try:
         from deidentification import Deidentification, DeidentificationConfig
     except ImportError:
-        print("Error: The 'text-deidentification' package is not installed.", file=sys.stderr)
-        print("Please install it by running: pip install text-deidentification", file=sys.stderr)
-        sys.exit(1)
+        if not quiet:
+            print("Warning: The 'text-deidentification' package is not installed. NLP scanning will be skipped.", file=sys.stderr)
+            print("Please install it by running: pip install text-deidentification", file=sys.stderr)
+        return None
         
     try:
         config = DeidentificationConfig(spacy_model='en_core_web_sm', save_tokens=True, excluded_entities=set())
         deidentifier = Deidentification(config)
         return deidentifier
     except Exception as e:
-        print(f"Error loading NLP model: {e}", file=sys.stderr)
-        print("Please ensure the spaCy model is downloaded: python -m spacy download en_core_web_sm", file=sys.stderr)
-        sys.exit(1)
+        if not quiet:
+            print(f"Warning: Error loading NLP model ({e}). NLP scanning will be skipped.", file=sys.stderr)
+            print("Please ensure the spaCy model is downloaded: python -m spacy download en_core_web_sm", file=sys.stderr)
+        return None
 
-def run_ps_crosscheck(repo_dir: str):
-    print("Running PowerShell Cross-Check...", file=sys.stderr)
+def run_ps_crosscheck(repo_dir: str, quiet=False):
+    import shutil
+    import tempfile
+
+    ps_exe = None
+    if shutil.which("pwsh"):
+        ps_exe = "pwsh"
+    elif shutil.which("powershell"):
+        ps_exe = "powershell"
+
+    if not ps_exe:
+        if not quiet:
+            print("Warning: Neither 'pwsh' nor 'powershell' was found on PATH. Skipping PowerShell cross-check.", file=sys.stderr)
+        return []
+
+    if not quiet:
+        print(f"Running PowerShell Cross-Check using {ps_exe}...", file=sys.stderr)
+
     ps_script = """
-$fileList = Get-ChildItem -Path "{repo_dir}" -Recurse -File
+$gitDir = [IO.Path]::DirectorySeparatorChar + '.git' + [IO.Path]::DirectorySeparatorChar
+$fileList = Get-ChildItem -Path "{repo_dir}" -Recurse -File | Where-Object {{ $_.FullName.Contains($gitDir) -ne $true }}
 $findings = @()
 
 foreach ($file in $fileList) {{
     switch -Regex ($file.Extension) {{
         "txt|csv|md|json|yml|yaml|env|py|xml" {{
             $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
-            if ($content -match "(?!(000|666|9))\d{{3}}-(?!00)\d{{2}}-(?!0000)\d{{4}}") {{
+            if ($content -match "(?!000|666|9\d{{2}})\d{{3}}[-\s]?(?!00)\d{{2}}[-\s]?(?!0000)\d{{4}}") {{
                 $findings += [PSCustomObject]@{{
                     File = $file.FullName
                     Type = "SSN (Cross-Check)"
@@ -320,13 +372,14 @@ foreach ($file in $fileList) {{
 }}
 $findings | ConvertTo-Json -Compress
 """
-    # Replace backslashes for PowerShell path
     safe_repo_dir = str(repo_dir).replace("\\", "\\\\")
-    script_path = Path(repo_dir) / ".ps_crosscheck.ps1"
-    script_path.write_text(ps_script.format(repo_dir=safe_repo_dir))
     
+    with tempfile.NamedTemporaryFile(suffix=".ps1", delete=False, mode="w", encoding="utf-8") as tf:
+        tf.write(ps_script.format(repo_dir=safe_repo_dir))
+        temp_script_path = tf.name
+
     try:
-        result = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(script_path)], capture_output=True, text=True)
+        result = subprocess.run([ps_exe, "-ExecutionPolicy", "Bypass", "-File", temp_script_path], capture_output=True, text=True)
         if result.stdout.strip():
             try:
                 data = json.loads(result.stdout)
@@ -337,56 +390,90 @@ $findings | ConvertTo-Json -Compress
                 return []
         return []
     finally:
-        if script_path.exists():
-            script_path.unlink()
+        try:
+            os.unlink(temp_script_path)
+        except Exception:
+            pass
 
-def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=None) -> dict:
+def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=None, quiet=False) -> dict:
     findings = {
         "suspicious_files": [],
         "current_secrets": [],
         "nlp_pii": []
     }
-    print("Scanning current working tree...", file=sys.stderr)
+    if not quiet:
+        print("Scanning current working tree...", file=sys.stderr)
     root = Path(repo_dir).resolve()
     all_secret_patterns = {**CUSTOM_SECRET_PATTERNS, **GITROB_CONTENT_PATTERNS, **AI_PATTERNS}
 
-    for path in root.rglob("*"):
-        if path.is_dir(): continue
-        rel_path = str(path.relative_to(root))
-        if match_exclude(rel_path, exclude_patterns): continue
-
-        for glob_pat in GITROB_SUSPICIOUS_FILES:
-            from fnmatch import fnmatch
-            if fnmatch(path.name, glob_pat) or fnmatch(rel_path, glob_pat):
-                findings["suspicious_files"].append(rel_path)
-                break
-
-        if path.suffix == '.ipynb':
-            findings["current_secrets"].extend(scan_ipynb(path, all_secret_patterns))
-        else:
-            try: 
-                content = path.read_text(errors="ignore")
-            except Exception: 
-                continue
+    for root_dir, dirs, files in os.walk(repo_dir):
+        # Avoid descending into .git completely
+        if '.git' in dirs:
+            dirs.remove('.git')
             
-            # Standard Secret/Regex PII Scanning
-            findings["current_secrets"].extend(scan_text(content, rel_path, all_secret_patterns))
-            for name, pattern in CUSTOM_PII_PATTERNS.items():
-                for m in re.finditer(pattern, content):
-                    findings["current_secrets"].append({"type": f"PII:{name}", "file": rel_path, "match": m.group(0).strip()})
+        # Avoid descending into other excluded folders
+        try:
+            rel_root = os.path.relpath(root_dir, repo_dir)
+        except Exception:
+            rel_root = "."
+        if rel_root == ".":
+            rel_root = ""
 
-            # NLP PII Scanning
-            if nlp_deidentifier and path.suffix in ['.txt', '.md', '.csv', '.json', '.yml', '.yaml', '.py']:
-                try:
-                    # Run it backwards over the text to populate tokens dictionary
-                    nlp_deidentifier.deidentify(content)
-                    tokens = nlp_deidentifier.get_identified_elements()
-                    for ent in tokens.get("entities", []):
-                        findings["nlp_pii"].append({"file": rel_path, "type": "NAME", "match": ent["text"]})
-                    for pron in tokens.get("pronouns", []):
-                        findings["nlp_pii"].append({"file": rel_path, "type": "PRONOUN", "match": pron["text"]})
-                except Exception:
-                    pass
+        active_dirs = []
+        for d in dirs:
+            dir_rel = os.path.join(rel_root, d).replace("\\", "/")
+            if match_exclude(dir_rel, exclude_patterns) or match_exclude(dir_rel + "/", exclude_patterns):
+                continue
+            active_dirs.append(d)
+        dirs[:] = active_dirs
+
+        for file in files:
+            file_rel_path = os.path.join(rel_root, file).replace("\\", "/")
+            if match_exclude(file_rel_path, exclude_patterns):
+                continue
+
+            path = Path(root_dir) / file
+            
+            # Check suspicious file names (safe even for large files)
+            for glob_pat in GITROB_SUSPICIOUS_FILES:
+                from fnmatch import fnmatch
+                if fnmatch(path.name, glob_pat) or fnmatch(file_rel_path, glob_pat):
+                    findings["suspicious_files"].append(file_rel_path)
+                    break
+
+            # Skip scanning content of files larger than 1MB
+            try:
+                if path.stat().st_size > 1_000_000:
+                    continue
+            except Exception:
+                continue
+
+            if path.suffix == '.ipynb':
+                findings["current_secrets"].extend(scan_ipynb(path, all_secret_patterns))
+            else:
+                try: 
+                    content = path.read_text(errors="ignore")
+                except Exception: 
+                    continue
+                
+                # Standard Secret/Regex PII Scanning
+                findings["current_secrets"].extend(scan_text(content, file_rel_path, all_secret_patterns))
+                for name, pattern in CUSTOM_PII_PATTERNS.items():
+                    for m in re.finditer(pattern, content):
+                        findings["current_secrets"].append({"type": f"PII:{name}", "file": file_rel_path, "match": m.group(0).strip()})
+
+                # NLP PII Scanning
+                if nlp_deidentifier and path.suffix in ['.txt', '.md', '.csv', '.json', '.yml', '.yaml', '.py']:
+                    try:
+                        # Run it backwards over the text to populate tokens dictionary
+                        nlp_deidentifier.deidentify(content)
+                        tokens = nlp_deidentifier.get_identified_elements()
+                        for ent in tokens.get("entities", []):
+                            findings["nlp_pii"].append({"file": file_rel_path, "type": "NAME", "match": ent["text"]})
+                        for pron in tokens.get("pronouns", []):
+                            findings["nlp_pii"].append({"file": file_rel_path, "type": "PRONOUN", "match": pron["text"]})
+                    except Exception:
+                        pass
 
     return findings
 
@@ -529,9 +616,6 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
     section("LLM REMEDIATION PROMPTS")
     w("Use these prompts with ChatGPT/Claude/Gemini to help clean your repository based on our findings.\n")
     
-    has_secrets = len(history_findings["secrets"]) > 0 or len(tree_findings["current_secrets"]) > 0
-    has_pii = len(history_findings["pii"]) > 0 or len(tree_findings["nlp_pii"]) > 0 or len(ps_findings) > 0
-
     if has_secrets:
         prompt = (
             "**For Credential Leaks:**\n"
@@ -542,12 +626,18 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
             "2. Scrub my git history using `git filter-repo` to remove all traces of these secrets.\n"
             "Please be as specific as possible. The leaked credentials include:\n"
         )
-        types_leaked = set()
-        for s in history_findings["secrets"]: types_leaked.add(s["type"])
-        for s in tree_findings["current_secrets"]: 
-            if not s["type"].startswith("PII"): types_leaked.add(s["type"])
-        for t in types_leaked:
-            prompt += f"- {t}\n"
+        secret_records = []
+        for s in history_findings["secrets"]:
+            redacted = redact_match(s["match"])
+            secret_records.append(f"- {s['type']} in {s['file']}:{s['line']} -> {redacted}")
+        for s in tree_findings["current_secrets"]:
+            if not s["type"].startswith("PII"):
+                redacted = redact_match(s["match"])
+                line_str = f":{s['line']}" if "line" in s else ""
+                secret_records.append(f"- {s['type']} in {s['file']}{line_str} -> {redacted}")
+                
+        for rec in sorted(set(secret_records)):
+            prompt += f"{rec}\n"
         w(prompt)
     
     if has_pii:
@@ -557,12 +647,19 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
             "committed to my code repository. What is the best strategy to securely remove this data "
             "using `git filter-repo` while maintaining my project's functionality? Specifically, I need to remove:\n"
         )
-        types_leaked = set()
-        for p in history_findings["pii"]: types_leaked.add(p["type"])
-        for p in tree_findings["nlp_pii"]: types_leaked.add(p["type"])
-        for p in ps_findings: types_leaked.add(p["Type"])
-        for t in types_leaked:
-            prompt += f"- {t}\n"
+        pii_records = []
+        for p in history_findings["pii"]:
+            redacted = redact_match(p["match"])
+            pii_records.append(f"- {p['type']} in {p['file']}:{p['line']} -> {redacted}")
+        for p in tree_findings["nlp_pii"]:
+            redacted = redact_match(p["match"])
+            pii_records.append(f"- {p['type']} in {p['file']} -> {redacted}")
+        for p in ps_findings:
+            redacted = redact_match(p["Match"])
+            pii_records.append(f"- {p['Type']} in {p['File']} -> {redacted}")
+            
+        for rec in sorted(set(pii_records)):
+            prompt += f"{rec}\n"
         w(prompt)
 
     if not has_secrets and not has_pii:
@@ -588,6 +685,8 @@ if __name__ == "__main__":
     parser.add_argument("--format", choices=["text", "json", "sarif"], default="text", help="Output format")
     parser.add_argument("--install-hook", action="store_true", help="Install standard fast pre-commit hook")
     parser.add_argument("--install-hook-strict", action="store_true", help="Install strict pre-commit hook (runs NLP and PowerShell crosscheck)")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress stderr status messages")
+    parser.add_argument("--generate-filter-repo", action="store_true", help="Generate replacements.txt for git filter-repo and print command")
     args = parser.parse_args()
 
     if args.install_hook or args.install_hook_strict:
@@ -596,21 +695,10 @@ if __name__ == "__main__":
             print("Error: Must run from the root of a git repository to install hooks.")
             sys.exit(1)
         
-        # Build the command based on strictness
         cmd_args = ""
         if args.install_hook_strict:
             cmd_args = " --nlp-pii --ps-crosscheck"
             
-        hook_content = f"""#!/usr/bin/env bash
-echo "Running omni-secret-scanner..."
-python scan-secrets.py{{cmd_args}}
-if [ $? -ne 0 ]; then
-    echo "❌ Secrets or PII detected! Commit blocked."
-    exit 1
-fi
-"""
-        # Note: escaping the curly braces around cmd_args because f-string was used above incorrectly
-        # Actually I just used {{ and }} inside the raw string if I used format, but I used f-string, so it should be {cmd_args}
         hook_content = f"""#!/usr/bin/env bash
 echo "Running omni-secret-scanner..."
 python scan-secrets.py{cmd_args}
@@ -621,7 +709,6 @@ fi
 """
         hook_path.parent.mkdir(parents=True, exist_ok=True)
         hook_path.write_text(hook_content, encoding="utf-8")
-        # Windows chmod is limited but works for basic executable bit in git bash/msys2
         try:
             hook_path.chmod(0o755)
         except Exception:
@@ -635,11 +722,11 @@ fi
 
     nlp_deidentifier = None
     if args.nlp_pii:
-        nlp_deidentifier = init_nlp_deidentifier()
+        nlp_deidentifier = init_nlp_deidentifier(quiet=args.quiet)
 
     ps_findings = []
     if args.ps_crosscheck:
-        ps_findings = run_ps_crosscheck(repo_dir)
+        ps_findings = run_ps_crosscheck(repo_dir, quiet=args.quiet)
 
     EXCLUDE_PATTERNS = [
         "*.lock", "*.svg", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.ico", "*.woff*",
@@ -648,10 +735,57 @@ fi
         "build/", "__pycache__/", "*.pyc",
     ]
 
-    history_findings = scan_history(EXCLUDE_PATTERNS, args.all_branches)
-    tree_findings = scan_current_tree(repo_dir, EXCLUDE_PATTERNS, nlp_deidentifier)
+    history_findings = scan_history(EXCLUDE_PATTERNS, args.all_branches, quiet=args.quiet)
+    tree_findings = scan_current_tree(repo_dir, EXCLUDE_PATTERNS, nlp_deidentifier, quiet=args.quiet)
     
     total_issues = generate_report(history_findings, tree_findings, ps_findings, args.output, args.format)
+
+    # Automated git filter-repo Generator
+    if args.generate_filter_repo:
+        unique_secrets = set()
+        for s in history_findings["secrets"]:
+            unique_secrets.add(s["match"])
+        for p in history_findings["pii"]:
+            unique_secrets.add(p["match"])
+        for e in history_findings["entropy"]:
+            unique_secrets.add(e["token"])
+        for s in tree_findings["current_secrets"]:
+            unique_secrets.add(s["match"])
+        for p in ps_findings:
+            unique_secrets.add(p["Match"])
+
+        # Filter out empty strings
+        unique_secrets = {sec.strip() for sec in unique_secrets if sec.strip()}
+
+        if unique_secrets:
+            with open("replacements.txt", "w", encoding="utf-8") as f:
+                for sec in sorted(unique_secrets):
+                    f.write(f"{sec}==>[REDACTED]\n")
+            print(f"\nGenerated replacements.txt with {len(unique_secrets)} unique secrets/PII items.")
+            
+            # Automatically append replacements.txt to .gitignore if not present
+            gitignore_path = Path(".gitignore")
+            add_to_gitignore = True
+            if gitignore_path.exists():
+                try:
+                    lines = gitignore_path.read_text(encoding="utf-8").splitlines()
+                    if any("replacements.txt" in line for line in lines):
+                        add_to_gitignore = False
+                except Exception:
+                    pass
+            
+            if add_to_gitignore:
+                try:
+                    with open(gitignore_path, "a", encoding="utf-8") as f:
+                        f.write("\n# Omni-Secret-Scanner filter-repo replacements\nreplacements.txt\n")
+                    print("Added replacements.txt to .gitignore")
+                except Exception as e:
+                    print(f"Warning: Could not update .gitignore: {e}", file=sys.stderr)
+
+            print("\nTo scrub these secrets from your repository history, run:")
+            print("git filter-repo --replace-text replacements.txt --force")
+        else:
+            print("\nNo secrets or PII were found to redact. replacements.txt was not generated.")
     
     # Exit code > 0 if secrets/PII were found so pre-commit hooks can fail
     if total_issues > 0:
