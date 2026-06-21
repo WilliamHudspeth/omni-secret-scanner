@@ -264,3 +264,105 @@ def test_run_dryrun_repo_scan(capsys, tmp_path):
     assert "DRY RUN: SECRET SCANNER AUDIT REPORT" in captured.out
     assert "Total files to scan: 2" in captured.out
     assert "secrets.key" in captured.out
+
+# ==============================================================================
+# 8. Dynatrace, Power Query, and Functional Language Tests
+# ==============================================================================
+
+def test_new_regex_patterns():
+    # Dynatrace
+    dt_api_token = "dt0c01.ST2EY72KQINMH574WMNVI7YN.G3O3F7CQFIYLKN5TVJQ3RCLJWJ6U3S"
+    dt_env_id = "dynatrace.environmentid = 'ab-cd-ef-gh'"
+    dt_config = "dynatrace_apikey = 'mytoken'"
+    
+    assert re.search(scanner.CUSTOM_SECRET_PATTERNS["DYNA_TRACE_API_TOKEN"], dt_api_token)
+    assert re.search(scanner.CUSTOM_SECRET_PATTERNS["DYNA_TRACE_ENV_ID"], dt_env_id)
+    assert re.search(scanner.CUSTOM_SECRET_PATTERNS["DYNA_TRACE_CONFIG"], dt_config)
+
+    # Power Query (M)
+    pq_webcontents = 'Web.Contents("http://example.com", [Headers=[Authorization="Bearer token"]])'
+    pq_conn_str = 'Server="myServer";Database="myDb";User="myUser";Password="myPassword"'
+    pq_hardcoded_key = 'api-key = "my_super_secret_api_key"'
+    pq_ext_cred = 'Extension.CurrentCredential()'
+
+    assert re.search(scanner.CUSTOM_SECRET_PATTERNS["POWER_QUERY_WEBCONTENTS"], pq_webcontents)
+    assert re.search(scanner.CUSTOM_SECRET_PATTERNS["POWER_QUERY_CONNECTION_STRING"], pq_conn_str)
+    assert re.search(scanner.CUSTOM_SECRET_PATTERNS["POWER_QUERY_HARDCODED_KEY"], pq_hardcoded_key)
+    assert re.search(scanner.CUSTOM_SECRET_PATTERNS["POWER_QUERY_EXTENSION_CREDENTIAL"], pq_ext_cred)
+
+    # Functional Configs
+    scala_secret = 'password = "mysecretpassword"'
+    haskell_secret = 'apikey = "myapikey"'
+    elixir_fetch = 'System.fetch_env!("MY_SECRET")'
+    clojure_getenv = 'System/getenv "MY_SECRET"'
+    case_class_secret = 'case class DBConfig(password: "secretpassword")'
+
+    assert re.search(scanner.CUSTOM_SECRET_PATTERNS["SCALA_CONFIG_SECRET"], scala_secret)
+    assert re.search(scanner.CUSTOM_SECRET_PATTERNS["HASKELL_CONFIG_SECRET"], haskell_secret)
+    assert re.search(scanner.CUSTOM_SECRET_PATTERNS["ELIXIR_SYSTEM_FETCH"], elixir_fetch)
+    assert re.search(scanner.CUSTOM_SECRET_PATTERNS["CLOJURE_SYSTEM_GETENV"], clojure_getenv)
+    assert re.search(scanner.CUSTOM_SECRET_PATTERNS["CASE_CLASS_SECRET"], case_class_secret)
+
+def test_scan_pbix(tmp_path):
+    import zipfile
+    pbix_path = tmp_path / "test.pbix"
+    
+    # Create a mock .pbix zip file
+    with zipfile.ZipFile(pbix_path, "w") as zf:
+        zf.writestr("DataModelSchema", 'api_key = "AIzaSyA12345678901234567890123456789012"\n')
+        zf.writestr("Mashup/Formulas/Section1.m", 'password = "mysecretpassword"\n')
+        zf.writestr("ignored.txt", 'ignored_secret = "val"\n')
+        
+    all_patterns = {**scanner.CUSTOM_SECRET_PATTERNS, **scanner.GITROB_CONTENT_PATTERNS}
+    hits = scanner.scan_pbix(str(pbix_path), all_patterns)
+    
+    # Check that DataModelSchema matches Google API Key
+    assert any(h["type"] == "Google API Key" and "DataModelSchema" in h["file"] for h in hits)
+    # Check that Mashup file matches SCALA_CONFIG_SECRET (which is password = "mysecretpassword")
+    assert any(h["type"] == "SCALA_CONFIG_SECRET" and "Section1.m" in h["file"] for h in hits)
+    # Check that ignored.txt is NOT in the findings
+    assert not any("ignored.txt" in h["file"] for h in hits)
+
+def test_run_semgrep_scan(monkeypatch):
+    import shutil
+    import subprocess
+    import json
+    
+    # Mock shutil.which to find "semgrep"
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/local/bin/semgrep" if cmd == "semgrep" else None)
+    
+    # Mock subprocess.run
+    mock_stdout = json.dumps({
+        "results": [
+            {
+                "path": "src/main.py",
+                "start": {"line": 15},
+                "check_id": "rules.test-rule",
+                "extra": {
+                    "message": "Test message",
+                    "lines": "secret = 'val'",
+                    "severity": "WARNING"
+                }
+            }
+        ]
+    })
+    
+    class MockCompletedProcess:
+        def __init__(self):
+            self.returncode = 0
+            self.stdout = mock_stdout
+            self.stderr = ""
+            
+    def mock_run(args, **kwargs):
+        return MockCompletedProcess()
+        
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    
+    findings = scanner.run_semgrep_scan("/fake/dir")
+    assert len(findings) == 1
+    assert findings[0]["file"] == "src/main.py"
+    assert findings[0]["line"] == 15
+    assert findings[0]["rule"] == "rules.test-rule"
+    assert findings[0]["message"] == "Test message"
+    assert findings[0]["match"] == "secret = 'val'"
+    assert findings[0]["severity"] == "WARNING"

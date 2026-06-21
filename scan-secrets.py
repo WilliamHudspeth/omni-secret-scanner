@@ -58,6 +58,18 @@ CUSTOM_SECRET_PATTERNS = {
     "Docker Password/Token": r"(?i)ENV\s+\w*(?:PASSWORD|PASS|SECRET|KEY|TOKEN|AUTH)\w*\s*=\s*['\"].*?['\"]",
     "Kubernetes Config Secret": r"(?i)(?:client-certificate-data\s*:\s*[A-Za-z0-9+/]{40,}=*|client-key-data\s*:\s*[A-Za-z0-9+/]{40,}=*)",
     "Terraform Hardcoded Credential": r"(?i)(?:aws_access_key|aws_secret_key|token|password|secret|api_key)\s*=\s*['\"].*?['\"]",
+    "DYNA_TRACE_API_TOKEN": r"dt0c01\.[a-zA-Z0-9]{24,}(?:\.[a-zA-Z0-9]{24,})*",
+    "DYNA_TRACE_ENV_ID": r"(?i)dynatrace.*?(?:environmentid|envid|tenant)\s*[:=]\s*['\"][a-zA-Z0-9\-]{8,}['\"]",
+    "DYNA_TRACE_CONFIG": r"(?i)(dynatrace|oneagent).*?(token|apikey|password)",
+    "POWER_QUERY_WEBCONTENTS": r"(?i)Web\.Contents\s*\(\s*\"[^\"]*\"",
+    "POWER_QUERY_CONNECTION_STRING": r"(?i)(?:Server|Database|User|Password)\s*=\s*\"[^\"]+\"",
+    "POWER_QUERY_HARDCODED_KEY": r"(?i)(?:api[_-]?key|token|secret)\s*=\s*\"[^\"]{8,}\"",
+    "POWER_QUERY_EXTENSION_CREDENTIAL": r"(?i)Extension\.CurrentCredential\s*\(\s*\)",
+    "SCALA_CONFIG_SECRET": r"(?i)(?:password|secret|key|token)\s*=\s*\"[^\"]{6,}\"",
+    "HASKELL_CONFIG_SECRET": r"(?i)(?:password|apikey|accessKey)\s*=\s*\"[^\"]{6,}\"",
+    "ELIXIR_SYSTEM_FETCH": r"(?i)System\.fetch_env!\s*\(\s*\"[A-Z_]+\"\s*\)",
+    "CLOJURE_SYSTEM_GETENV": r"(?i)System/getenv\s+\"[^\"]+\"",
+    "CASE_CLASS_SECRET": r"(?i)(?:case\s+class|data\s+class)\s+\w+\([^)]*?(?:password|secret|key|token)\s*:\s*\"[^\"]+\"",
 }
 
 CUSTOM_PII_PATTERNS = {
@@ -95,7 +107,9 @@ GITROB_SUSPICIOUS_FILES = [
     "*.config", ".git-credentials", ".s3cfg", ".tugboat", "proftpdpasswd",
     ".htpasswd", ".netrc", "wp-config.php", "database.yml", "settings.py",
     ".bash_history", ".mysql_history", ".psql_history", ".pgpass", "shadow", "passwd",
-    "mcp.json"
+    "mcp.json",
+    "dynatrace.config.yaml", "dynatrace.config.yml", "dtconfig.json", "oneagent-install.sh",
+    "*.dynatrace", ".dynatrace/", "*.pq", "*.m", "*.mashup", "*.query", "*.odc", "*.pbix"
 ]
 
 GITROB_CONTENT_PATTERNS = {
@@ -667,6 +681,34 @@ def scan_ipynb(path, all_secret_patterns):
             local_hits += scan_text(txt, f"{path}:cell{i}:output", all_secret_patterns)
     return local_hits
 
+def scan_pbix(path, all_secret_patterns):
+    import zipfile
+    local_hits = []
+    try:
+        with zipfile.ZipFile(path) as zf:
+            for info in zf.infolist():
+                if 'DataModelSchema' in info.filename or info.filename.startswith('Mashup/'):
+                    try:
+                        content = zf.read(info.filename).decode(encoding='utf-8', errors='ignore')
+                        for idx, line in enumerate(content.splitlines(), 1):
+                            for name, pattern in all_secret_patterns.items():
+                                try:
+                                    for m in re.finditer(pattern, line):
+                                        val = m.group(0).strip()
+                                        local_hits.append({
+                                            "type": name,
+                                            "file": f"{path}/{info.filename}",
+                                            "line": idx,
+                                            "match": val
+                                        })
+                                except re.error:
+                                    pass
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return local_hits
+
 # ------------------------------------------------------------------------------
 # NLP & PowerShell Integrations
 # ------------------------------------------------------------------------------
@@ -897,6 +939,48 @@ $findings | ConvertTo-Json -Compress
         except Exception:
             pass
 
+def run_semgrep_scan(repo_dir: str, quiet=False) -> list:
+    import shutil
+    import subprocess
+    import json
+    import sys
+    
+    findings = []
+    semgrep_exe = shutil.which("semgrep")
+    if not semgrep_exe:
+        if not quiet:
+            print("Warning: The 'semgrep' CLI tool is not installed. Semgrep SAST scanning will be skipped.", file=sys.stderr)
+            print("Please install it by running: pip install semgrep", file=sys.stderr)
+        return findings
+
+    if not quiet:
+        print("Running Semgrep AST Static Analysis scan...", file=sys.stderr)
+    try:
+        result = subprocess.run(
+            [semgrep_exe, "scan", "--config=auto", "--json", "--quiet"],
+            cwd=repo_dir,
+            capture_output=True, text=True, errors="replace"
+        )
+        if result.returncode in (0, 1) and result.stdout:
+            try:
+                data = json.loads(result.stdout)
+                results = data.get("results", [])
+                for res in results:
+                    findings.append({
+                        "file": res.get("path"),
+                        "line": res.get("start", {}).get("line"),
+                        "rule": res.get("check_id"),
+                        "message": res.get("extra", {}).get("message"),
+                        "match": res.get("extra", {}).get("lines"),
+                        "severity": res.get("extra", {}).get("severity")
+                    })
+            except Exception:
+                pass
+    except Exception as e:
+        if not quiet:
+            print(f"Warning: Error running Semgrep: {e}", file=sys.stderr)
+    return findings
+
 def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=None, quiet=False, ignore_tokens=None, sensitive_words=None, extract_code_blocks=False, scan_submodules=False, presidio_analyzer=None) -> dict:
     if ignore_tokens is None:
         ignore_tokens = []
@@ -957,6 +1041,12 @@ def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=No
             if path.suffix == '.ipynb':
                 # Filter scan_ipynb results with ignore_tokens
                 raw_hits = scan_ipynb(path, all_secret_patterns)
+                for hit in raw_hits:
+                    if hit["match"] not in ignore_tokens:
+                        findings["current_secrets"].append(hit)
+            elif path.suffix == '.pbix':
+                # Filter scan_pbix results with ignore_tokens
+                raw_hits = scan_pbix(path, all_secret_patterns)
                 for hit in raw_hits:
                     if hit["match"] not in ignore_tokens:
                         findings["current_secrets"].append(hit)
@@ -1180,13 +1270,16 @@ def run_dryrun_repo_scan(repo_dir: str, exclude_patterns: list, scan_submodules=
 # ------------------------------------------------------------------------------
 # Report generation
 # ------------------------------------------------------------------------------
-def generate_report(history_findings: dict, tree_findings: dict, ps_findings: list, output_file=None, output_format="text", mask=False, context_lines=0, show_score=False, snippet_content=None):
+def generate_report(history_findings: dict, tree_findings: dict, ps_findings: list, output_file=None, output_format="text", mask=False, context_lines=0, show_score=False, snippet_content=None, semgrep_findings=None):
+    if semgrep_findings is None:
+        semgrep_findings = []
+        
     has_secrets = len(history_findings["secrets"]) > 0 or len(tree_findings["current_secrets"]) > 0
     has_pii = len(history_findings["pii"]) > 0 or len(tree_findings["nlp_pii"]) > 0 or len(ps_findings) > 0
     total_issues = (
         len(history_findings["secrets"]) + len(history_findings["pii"]) + len(history_findings["entropy"]) +
         len(history_findings["commits"]) + len(tree_findings["current_secrets"]) + len(tree_findings["nlp_pii"]) +
-        len(ps_findings)
+        len(ps_findings) + len(semgrep_findings)
     )
 
     if output_format == "json":
@@ -1194,6 +1287,7 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
         history_copy = copy.deepcopy(history_findings)
         tree_copy = copy.deepcopy(tree_findings)
         ps_copy = copy.deepcopy(ps_findings)
+        semgrep_copy = copy.deepcopy(semgrep_findings)
         
         if mask:
             for s in history_copy["secrets"]: s["match"] = redact_match(s["match"])
@@ -1205,12 +1299,16 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
             for s in tree_copy["current_secrets"]: s["match"] = redact_match(s["match"])
             for p in tree_copy["nlp_pii"]: p["match"] = redact_match(p["match"])
             for p in ps_copy: p["Match"] = redact_match(p["Match"])
+            for s in semgrep_copy:
+                if s.get("match"):
+                    s["match"] = redact_match(s["match"])
 
         # Calculate score
         score = 100
         score -= (len(history_findings["secrets"]) + len(tree_findings["current_secrets"])) * 40
         score -= (len(history_findings["pii"]) + len(tree_findings["nlp_pii"]) + len(ps_findings)) * 20
         score -= len(history_findings["entropy"]) * 10
+        score -= len(semgrep_findings) * 10
         score = max(0, min(100, score))
 
         report = {
@@ -1224,7 +1322,8 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
             "findings": {
                 "history": history_copy,
                 "current_tree": tree_copy,
-                "powershell_crosscheck": ps_copy
+                "powershell_crosscheck": ps_copy,
+                "semgrep_sast": semgrep_copy
             }
         }
         json_out = json.dumps(report, indent=2)
@@ -1365,6 +1464,15 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
             m_val = redact_match(p['Match']) if mask else p['Match']
             w(f"[{p['Type']}] {p['File']} -> {m_val}")
 
+    if semgrep_findings:
+        section("SEMGREP SAST STATIC ANALYSIS FINDINGS")
+        for s in semgrep_findings:
+            m_val = redact_match(s['match']) if (mask and s.get('match')) else s.get('match', '')
+            m_val_preview = m_val.splitlines()[0].strip() if m_val else ""
+            w(f"[{s['rule']}] {s['file']}:{s.get('line', '?')} ({s.get('severity', 'warning')}) -> {s.get('message')}")
+            if m_val_preview:
+                w(f"  Code: {m_val_preview}")
+
     # Generate gitignore suggestions
     gitignore_suggestions = []
     files_to_check = set(tree_findings["suspicious_files"])
@@ -1391,6 +1499,7 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
         score -= (len(history_findings["secrets"]) + len(tree_findings["current_secrets"])) * 40
         score -= (len(history_findings["pii"]) + len(tree_findings["nlp_pii"]) + len(ps_findings)) * 20
         score -= len(history_findings["entropy"]) * 10
+        score -= len(semgrep_findings) * 10
         score = max(0, min(100, score))
         
         section("SECURITY SUMMARY & SAFE-TO-SHARE SCORE")
@@ -1404,6 +1513,7 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
         w(f"- Leaked Secrets: {len(history_findings['secrets']) + len(tree_findings['current_secrets'])}")
         w(f"- PII Detections: {len(history_findings['pii']) + len(tree_findings['nlp_pii']) + len(ps_findings)}")
         w(f"- High Entropy Tokens: {len(history_findings['entropy'])}")
+        w(f"- Semgrep SAST Issues: {len(semgrep_findings)}")
 
     # LLM Remediation Prompt Section
     section("LLM REMEDIATION PROMPTS")
@@ -1540,7 +1650,7 @@ def menu_picker(title, options, selected_idx):
             print(f"     [ {opt} ]")
     print()
 
-def flatten_findings(history_findings, tree_findings, ps_findings):
+def flatten_findings(history_findings, tree_findings, ps_findings, semgrep_findings=None):
     flat = []
     
     # History Secrets
@@ -1610,6 +1720,18 @@ def flatten_findings(history_findings, tree_findings, ps_findings):
             "raw": p
         })
 
+    # Semgrep SAST
+    if semgrep_findings:
+        for s in semgrep_findings:
+            flat.append({
+                "category": "Semgrep SAST",
+                "file": s.get("file", "unknown"),
+                "line": s.get("line", "?"),
+                "type": f"SAST ({s.get('rule', 'Semgrep Rule')})",
+                "match": s.get("match", s.get("message", "")),
+                "raw": s
+            })
+
     return flat
 
 def view_findings_menu(findings, state, snippet_content=None):
@@ -1625,11 +1747,13 @@ def view_findings_menu(findings, state, snippet_content=None):
     tree_secrets_count = sum(1 for f in findings if f["category"] == "Tree Secret")
     pii_count = sum(1 for f in findings if f["category"] in ("History PII", "NLP PII", "PS Crosscheck"))
     entropy_count = sum(1 for f in findings if f["category"] == "History Entropy")
+    semgrep_count = sum(1 for f in findings if f["category"] == "Semgrep SAST")
     
     score = 100
     score -= (history_secrets_count + tree_secrets_count) * 40
     score -= pii_count * 20
     score -= entropy_count * 10
+    score -= semgrep_count * 10
     score = max(0, min(100, score))
     
     risk_label = "GREEN (Safe to Share)"
@@ -1651,7 +1775,7 @@ def view_findings_menu(findings, state, snippet_content=None):
         print("\033[1;36m  SCAN RESULTS EXPLORER\033[0m")
         print("\033[1;36m============================================================\033[0m")
         print(f"Safety Score: {risk_color}{score}/100 - {risk_label}\033[0m")
-        print(f"Detections: Secrets={history_secrets_count+tree_secrets_count} PII={pii_count} High-Entropy={entropy_count}\n")
+        print(f"Detections: Secrets={history_secrets_count+tree_secrets_count} PII={pii_count} High-Entropy={entropy_count} Semgrep={semgrep_count}\n")
         print("Use UP/DOWN arrow keys to navigate, R to generate filter-repo scrub commands, ESC/Q to return.\n")
         
         if selected < scroll_offset:
@@ -1763,6 +1887,7 @@ def configure_settings_menu(state):
             f"Since Limit: [{state['since'] if state['since'] else '(all)'}]",
             f"Scan Submodules: [{'ENABLED' if state.get('submodules', False) else 'DISABLED'}]",
             f"Enable Presidio NLP: [{'ENABLED' if state.get('presidio', False) else 'DISABLED'}]",
+            f"Enable Semgrep SAST: [{'ENABLED' if state.get('semgrep', False) else 'DISABLED'}]",
             "Go Back to Main Menu"
         ]
         menu_picker("SETTINGS CONFIGURATION", options, selected)
@@ -1811,6 +1936,8 @@ def configure_settings_menu(state):
             elif selected == 10:
                 state['presidio'] = not state.get('presidio', False)
             elif selected == 11:
+                state['semgrep'] = not state.get('semgrep', False)
+            elif selected == 12:
                 break
 
 def run_tui_repo_scan(state):
@@ -1857,15 +1984,20 @@ def run_tui_repo_scan(state):
     print("Scanning current files...")
     tree_findings = scan_current_tree(state["repo_dir"], EXCLUDE_PATTERNS, nlp_deidentifier, quiet=True, ignore_tokens=ignore_tokens, sensitive_words=state["sensitive_words"], extract_code_blocks=state["extract_code_blocks"], scan_submodules=state.get("submodules", False), presidio_analyzer=presidio_analyzer)
     
+    semgrep_findings = []
+    if state.get("semgrep", False):
+        print("Running Semgrep AST Static Analysis...")
+        semgrep_findings = run_semgrep_scan(state["repo_dir"], quiet=True)
+        
     print("Compiling findings...")
-    findings = flatten_findings(history_findings, tree_findings, ps_findings)
+    findings = flatten_findings(history_findings, tree_findings, ps_findings, semgrep_findings=semgrep_findings)
     
     try:
         report_file = "report.json"
         total_issues = (
             len(history_findings["secrets"]) + len(history_findings["pii"]) + len(history_findings["entropy"]) +
             len(history_findings["commits"]) + len(tree_findings["current_secrets"]) + len(tree_findings["nlp_pii"]) +
-            len(ps_findings)
+            len(ps_findings) + len(semgrep_findings)
         )
         has_secrets = len(history_findings["secrets"]) > 0 or len(tree_findings["current_secrets"]) > 0
         has_pii = len(history_findings["pii"]) > 0 or len(tree_findings["nlp_pii"]) > 0 or len(ps_findings) > 0
@@ -1873,6 +2005,7 @@ def run_tui_repo_scan(state):
         score -= (len(history_findings["secrets"]) + len(tree_findings["current_secrets"])) * 40
         score -= (len(history_findings["pii"]) + len(tree_findings["nlp_pii"]) + len(ps_findings)) * 20
         score -= len(history_findings["entropy"]) * 10
+        score -= len(semgrep_findings) * 10
         score = max(0, min(100, score))
         
         report = {
@@ -1886,7 +2019,8 @@ def run_tui_repo_scan(state):
             "findings": {
                 "history": history_findings,
                 "current_tree": tree_findings,
-                "powershell_crosscheck": ps_findings
+                "powershell_crosscheck": ps_findings,
+                "semgrep_sast": semgrep_findings
             }
         }
         with open(report_file, "w", encoding="utf-8") as f:
@@ -2002,7 +2136,8 @@ def run_tui(args):
         "reflog": args.reflog,
         "since": args.since,
         "submodules": args.submodules,
-        "presidio": args.presidio
+        "presidio": args.presidio,
+        "semgrep": args.semgrep
     }
     
     selected = 0
@@ -2071,6 +2206,7 @@ if __name__ == "__main__":
     parser.add_argument("--submodules", action="store_true", help="Scan submodules recursively in working tree and history")
     parser.add_argument("--presidio", action="store_true", help="Enable Microsoft Presidio NLP scanning for PII")
     parser.add_argument("--dryrun", "--dry-run", action="store_true", help="Perform a dry run: print what would be scanned/redacted without doing it")
+    parser.add_argument("--semgrep", action="store_true", help="Enable Semgrep AST static analysis scanning")
     args = parser.parse_args()
 
     if args.redact_file:
@@ -2195,7 +2331,11 @@ fi
         
     tree_findings = scan_current_tree(repo_dir, EXCLUDE_PATTERNS, nlp_deidentifier, quiet=args.quiet, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words, extract_code_blocks=args.extract_code_blocks, scan_submodules=args.submodules, presidio_analyzer=presidio_analyzer)
     
-    total_issues = generate_report(history_findings, tree_findings, ps_findings, args.output, args.format, mask=args.mask, context_lines=args.context_lines, show_score=args.confidence_score)
+    semgrep_findings = []
+    if args.semgrep:
+        semgrep_findings = run_semgrep_scan(repo_dir, quiet=args.quiet)
+
+    total_issues = generate_report(history_findings, tree_findings, ps_findings, args.output, args.format, mask=args.mask, context_lines=args.context_lines, show_score=args.confidence_score, semgrep_findings=semgrep_findings)
 
     # Automated git filter-repo Generator
     if args.generate_filter_repo:
@@ -2206,6 +2346,9 @@ fi
             unique_secrets.add(p["match"])
         for e in history_findings["entropy"]:
             unique_secrets.add(e["token"])
+        for s in semgrep_findings:
+            if s.get("match"):
+                unique_secrets.add(s["match"])
         for s in tree_findings["current_secrets"]:
             unique_secrets.add(s["match"])
         for p in ps_findings:
