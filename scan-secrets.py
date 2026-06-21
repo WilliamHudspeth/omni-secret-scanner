@@ -138,6 +138,13 @@ def is_ignored_entropy_token(token: str) -> bool:
 def redact_match(match_str: str) -> str:
     if not match_str:
         return "[REDACTED]"
+    if " (Decoded: " in match_str:
+        parts = match_str.split(" (Decoded: ", 1)
+        base64_token = parts[0]
+        decoded_secret = parts[1].rstrip(")")
+        redacted_base64 = redact_match(base64_token)
+        redacted_decoded = redact_match(decoded_secret)
+        return f"{redacted_base64} (Decoded: {redacted_decoded})"
     if len(match_str) <= 4:
         return "[REDACTED]"
     for prefix in ["AKIA", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "hf_", "gsk_", "pplx-", "sk-ant-", "sk-proj-", "sk-", "nvapi-", "sbp_"]:
@@ -172,9 +179,70 @@ def is_git_ignored(file_path: str) -> bool:
     except Exception:
         return False
 
-def scan_snippet(content: str, source_name: str, entropy_threshold=3.8, ignore_tokens=None) -> dict:
+def extract_markdown_code_blocks(text: str) -> list:
+    blocks = []
+    pattern = r"```(?:[a-zA-Z0-9+#-]+)?\n(.*?)\n```"
+    for m in re.finditer(pattern, text, re.DOTALL):
+        blocks.append(m.group(1))
+    return blocks
+
+def get_context_snippet(file_path: str, target_line: int, context_lines: int, content=None) -> str:
+    if content is None:
+        try:
+            if os.path.exists(file_path):
+                content = Path(file_path).read_text(errors="ignore")
+        except Exception:
+            return ""
+    if not content:
+        return ""
+    lines = content.splitlines()
+    start = max(0, target_line - 1 - context_lines)
+    end = min(len(lines), target_line + context_lines)
+    
+    snippet_lines = []
+    for idx in range(start, end):
+        line_no = idx + 1
+        indicator = " > " if line_no == target_line else "   "
+        snippet_lines.append(f"{indicator}{line_no}: {lines[idx]}")
+    return "\n".join(snippet_lines)
+
+def scan_obfuscated_secrets(text: str, source_identifier: str, all_secret_patterns: dict) -> list:
+    import base64
+    local_hits = []
+    candidates = re.finditer(r"\b[A-Za-z0-9+/]{24,}={0,2}\b", text)
+    for m in candidates:
+        token = m.group(0)
+        try:
+            pad_len = 4 - (len(token) % 4)
+            if pad_len < 4:
+                token_padded = token + ("=" * pad_len)
+            else:
+                token_padded = token
+            decoded_bytes = base64.b64decode(token_padded)
+            decoded_text = decoded_bytes.decode('utf-8', errors='strict')
+            if len(decoded_text) > 10 and all(32 <= ord(c) < 127 or c in "\r\n\t" for c in decoded_text):
+                for name, pattern in all_secret_patterns.items():
+                    for match_obf in re.finditer(pattern, decoded_text):
+                        local_hits.append({
+                            "type": f"Obfuscated:{name}",
+                            "file": source_identifier,
+                            "match": f"{token} (Decoded: {match_obf.group(0).strip()})"
+                        })
+        except Exception:
+            pass
+    return local_hits
+
+def scan_snippet(content: str, source_name: str, entropy_threshold=3.8, ignore_tokens=None, extract_code_blocks=False, sensitive_words=None) -> dict:
     if ignore_tokens is None:
         ignore_tokens = []
+    if sensitive_words is None:
+        sensitive_words = []
+        
+    if extract_code_blocks and (source_name.endswith(".md") or source_name in ("stdin", "text_snippet")):
+        blocks = extract_markdown_code_blocks(content)
+        if blocks:
+            content = "\n".join(blocks)
+            
     all_secret_patterns = {**CUSTOM_SECRET_PATTERNS, **GITROB_CONTENT_PATTERNS, **AI_PATTERNS}
     findings = {
         "secrets": [],
@@ -182,35 +250,74 @@ def scan_snippet(content: str, source_name: str, entropy_threshold=3.8, ignore_t
         "entropy": []
     }
     
-    # Standard Secrets
-    for name, pattern in all_secret_patterns.items():
-        try:
-            for m in re.finditer(pattern, content):
+    lines = content.splitlines()
+    for idx, line in enumerate(lines):
+        line_no = idx + 1
+        
+        # Standard Secrets
+        for name, pattern in all_secret_patterns.items():
+            try:
+                for m in re.finditer(pattern, line):
+                    val = m.group(0).strip()
+                    if val not in ignore_tokens:
+                        findings["secrets"].append({
+                            "type": name,
+                            "file": source_name,
+                            "line": line_no,
+                            "match": val
+                        })
+            except re.error:
+                pass
+                
+        # Obfuscated Base64 Secrets
+        obf_hits = scan_obfuscated_secrets(line, source_name, all_secret_patterns)
+        for hit in obf_hits:
+            if hit["match"] not in ignore_tokens:
+                hit["line"] = line_no
+                findings["secrets"].append(hit)
+                
+        # Sensitive Words
+        for word in sensitive_words:
+            if word.lower() in line.lower():
+                for m in re.finditer(re.escape(word), line, re.IGNORECASE):
+                    val = m.group(0)
+                    if val not in ignore_tokens:
+                        findings["secrets"].append({
+                            "type": f"Sensitive Word: {word}",
+                            "file": source_name,
+                            "line": line_no,
+                            "match": val
+                        })
+                        
+        # Regex PII
+        for name, pattern in CUSTOM_PII_PATTERNS.items():
+            for m in re.finditer(pattern, line):
                 val = m.group(0).strip()
                 if val not in ignore_tokens:
-                    findings["secrets"].append({"type": name, "file": source_name, "match": val})
-        except re.error:
-            pass
-            
-    # Regex PII
-    for name, pattern in CUSTOM_PII_PATTERNS.items():
-        for m in re.finditer(pattern, content):
-            val = m.group(0).strip()
-            if val not in ignore_tokens:
-                findings["pii"].append({"type": name, "file": source_name, "match": val})
+                    findings["pii"].append({
+                        "type": name,
+                        "file": source_name,
+                        "line": line_no,
+                        "match": val
+                    })
+                    
+        # Entropy
+        candidates = re.finditer(r"\b[A-Za-z0-9_\-]{16,}\b", line)
+        for m in candidates:
+            token = m.group(0)
+            if token.isdigit(): continue
+            if all(c in "0123456789abcdefABCDEF" for c in token) and len(token) in (32, 40): continue
+            if is_ignored_entropy_token(token): continue
+            if token in ignore_tokens: continue
+            entropy = shannon_entropy(token)
+            if entropy >= entropy_threshold:
+                findings["entropy"].append({
+                    "file": source_name,
+                    "line": line_no,
+                    "token": token,
+                    "entropy": round(entropy, 2)
+                })
                 
-    # Entropy
-    candidates = re.finditer(r"\b[A-Za-z0-9_\-]{16,}\b", content)
-    for m in candidates:
-        token = m.group(0)
-        if token.isdigit(): continue
-        if all(c in "0123456789abcdefABCDEF" for c in token) and len(token) in (32, 40): continue
-        if is_ignored_entropy_token(token): continue
-        if token in ignore_tokens: continue
-        entropy = shannon_entropy(token)
-        if entropy >= entropy_threshold:
-            findings["entropy"].append({"file": source_name, "token": token, "entropy": round(entropy, 2)})
-            
     return findings
 
 def match_exclude(path: str, exclude_patterns: list) -> bool:
@@ -259,9 +366,11 @@ def scan_commit_messages(all_branches=False):
             commit_hash, message = parts
             yield commit_hash.strip(), message.strip()
 
-def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entropy_threshold=3.8, ignore_tokens=None) -> dict:
+def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entropy_threshold=3.8, ignore_tokens=None, sensitive_words=None) -> dict:
     if ignore_tokens is None:
         ignore_tokens = []
+    if sensitive_words is None:
+        sensitive_words = []
     findings = {
         "secrets": [],
         "pii": [],
@@ -301,6 +410,25 @@ def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entrop
                     findings["secrets"].append({"type": name, "file": file_path, "line": line_no, "match": val})
             except re.error:
                 pass
+                
+        obf_hits = scan_obfuscated_secrets(content, file_path, all_secret_patterns)
+        for hit in obf_hits:
+            if hit["match"] not in ignore_tokens:
+                hit["line"] = line_no
+                findings["secrets"].append(hit)
+                
+        for word in sensitive_words:
+            if word.lower() in content.lower():
+                for m in re.finditer(re.escape(word), content, re.IGNORECASE):
+                    val = m.group(0)
+                    if val not in ignore_tokens:
+                        findings["secrets"].append({
+                            "type": f"Sensitive Word: {word}",
+                            "file": file_path,
+                            "line": line_no,
+                            "match": val
+                        })
+                        
         for name, pattern in CUSTOM_PII_PATTERNS.items():
             for m in re.finditer(pattern, content):
                 val = m.group(0).strip()
@@ -325,6 +453,23 @@ def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entrop
                 val = m.group(0).strip()
                 if val in ignore_tokens: continue
                 findings["commits"].append({"type": name, "commit": commit_hash[:8], "match": val})
+                
+        obf_hits = scan_obfuscated_secrets(message, commit_hash[:8], all_secret_patterns)
+        for hit in obf_hits:
+            if hit["match"] not in ignore_tokens:
+                findings["commits"].append({"type": hit["type"], "commit": commit_hash[:8], "match": hit["match"]})
+                
+        for word in sensitive_words:
+            if word.lower() in message.lower():
+                for m in re.finditer(re.escape(word), message, re.IGNORECASE):
+                    val = m.group(0)
+                    if val not in ignore_tokens:
+                        findings["commits"].append({
+                            "type": f"Sensitive Word: {word}",
+                            "commit": commit_hash[:8],
+                            "match": val
+                        })
+                        
         for name, pattern in CUSTOM_PII_PATTERNS.items():
             for m in re.finditer(pattern, message):
                 val = m.group(0).strip()
@@ -482,9 +627,11 @@ $findings | ConvertTo-Json -Compress
         except Exception:
             pass
 
-def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=None, quiet=False, ignore_tokens=None) -> dict:
+def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=None, quiet=False, ignore_tokens=None, sensitive_words=None, extract_code_blocks=False) -> dict:
     if ignore_tokens is None:
         ignore_tokens = []
+    if sensitive_words is None:
+        sensitive_words = []
     findings = {
         "suspicious_files": [],
         "current_secrets": [],
@@ -549,16 +696,63 @@ def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=No
                 except Exception: 
                     continue
                 
-                # Standard Secret/Regex PII Scanning
-                raw_hits = scan_text(content, file_rel_path, all_secret_patterns)
-                for hit in raw_hits:
-                    if hit["match"] not in ignore_tokens:
-                        findings["current_secrets"].append(hit)
-                for name, pattern in CUSTOM_PII_PATTERNS.items():
-                    for m in re.finditer(pattern, content):
-                        val = m.group(0).strip()
-                        if val not in ignore_tokens:
-                            findings["current_secrets"].append({"type": f"PII:{name}", "file": file_rel_path, "match": val})
+                # Extract code blocks if requested
+                if extract_code_blocks and file_rel_path.endswith(".md"):
+                    blocks = extract_markdown_code_blocks(content)
+                    if blocks:
+                        content = "\n".join(blocks)
+                
+                # Scan line-by-line to get line numbers
+                lines = content.splitlines()
+                for idx, line in enumerate(lines):
+                    line_no = idx + 1
+                    
+                    # Standard Secrets
+                    for name, pattern in all_secret_patterns.items():
+                        try:
+                            for m in re.finditer(pattern, line):
+                                val = m.group(0).strip()
+                                if val not in ignore_tokens:
+                                    findings["current_secrets"].append({
+                                        "type": name,
+                                        "file": file_rel_path,
+                                        "line": line_no,
+                                        "match": val
+                                    })
+                        except re.error:
+                            pass
+                            
+                    # Obfuscated Base64 Secrets
+                    obf_hits = scan_obfuscated_secrets(line, file_rel_path, all_secret_patterns)
+                    for hit in obf_hits:
+                        if hit["match"] not in ignore_tokens:
+                            hit["line"] = line_no
+                            findings["current_secrets"].append(hit)
+                            
+                    # Sensitive Words
+                    for word in sensitive_words:
+                        if word.lower() in line.lower():
+                            for m in re.finditer(re.escape(word), line, re.IGNORECASE):
+                                val = m.group(0)
+                                if val not in ignore_tokens:
+                                    findings["current_secrets"].append({
+                                        "type": f"Sensitive Word: {word}",
+                                        "file": file_rel_path,
+                                        "line": line_no,
+                                        "match": val
+                                    })
+                                    
+                    # Regex PII
+                    for name, pattern in CUSTOM_PII_PATTERNS.items():
+                        for m in re.finditer(pattern, line):
+                            val = m.group(0).strip()
+                            if val not in ignore_tokens:
+                                findings["current_secrets"].append({
+                                    "type": f"PII:{name}",
+                                    "file": file_rel_path,
+                                    "line": line_no,
+                                    "match": val
+                                })
 
                 # NLP PII Scanning
                 if nlp_deidentifier and path.suffix in ['.txt', '.md', '.csv', '.json', '.yml', '.yaml', '.py']:
@@ -582,7 +776,7 @@ def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=No
 # ------------------------------------------------------------------------------
 # Report generation
 # ------------------------------------------------------------------------------
-def generate_report(history_findings: dict, tree_findings: dict, ps_findings: list, output_file=None, output_format="text", mask=False):
+def generate_report(history_findings: dict, tree_findings: dict, ps_findings: list, output_file=None, output_format="text", mask=False, context_lines=0, show_score=False, snippet_content=None):
     has_secrets = len(history_findings["secrets"]) > 0 or len(tree_findings["current_secrets"]) > 0
     has_pii = len(history_findings["pii"]) > 0 or len(tree_findings["nlp_pii"]) > 0 or len(ps_findings) > 0
     total_issues = (
@@ -608,12 +802,20 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
             for p in tree_copy["nlp_pii"]: p["match"] = redact_match(p["match"])
             for p in ps_copy: p["Match"] = redact_match(p["Match"])
 
+        # Calculate score
+        score = 100
+        score -= (len(history_findings["secrets"]) + len(tree_findings["current_secrets"])) * 40
+        score -= (len(history_findings["pii"]) + len(tree_findings["nlp_pii"]) + len(ps_findings)) * 20
+        score -= len(history_findings["entropy"]) * 10
+        score = max(0, min(100, score))
+
         report = {
             "scan_time": datetime.now().isoformat(),
             "summary": {
                 "total_issues": total_issues,
                 "has_secrets": has_secrets,
-                "has_pii": has_pii
+                "has_pii": has_pii,
+                "safety_score": score
             },
             "findings": {
                 "history": history_copy,
@@ -695,21 +897,28 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
     if history_findings["secrets"]:
         for s in history_findings["secrets"]:
             m_val = redact_match(s['match']) if mask else s['match']
-            w(f"[{s['type']}] {s['file']}:{s['line']} -> {m_val}")
+            w(f"[{s['type']}] {s['file']}:{s.get('line', '?')} -> {m_val}")
+            if context_lines > 0 and s.get('line') and snippet_content:
+                context = get_context_snippet(s['file'], s['line'], context_lines, content=snippet_content)
+                if context:
+                    if mask:
+                        context = context.replace(s['match'], redact_match(s['match']))
+                    w(context)
+                    w()
     else: w("None found.")
 
     section("HISTORY SCAN – PII")
     if history_findings["pii"]:
         for p in history_findings["pii"]:
             m_val = redact_match(p['match']) if mask else p['match']
-            w(f"[{p['type']}] {p['file']}:{p['line']} -> {m_val}")
+            w(f"[{p['type']}] {p['file']}:{p.get('line', '?')} -> {m_val}")
     else: w("None found.")
 
     section("HISTORY SCAN – HIGH ENTROPY STRINGS")
     if history_findings["entropy"]:
         for e in history_findings["entropy"]:
             t_val = redact_match(e['token']) if mask else e['token']
-            w(f"File {e['file']}:{e['line']}  entropy={e['entropy']} -> {t_val}")
+            w(f"File {e['file']}:{e.get('line', '?')}  entropy={e['entropy']} -> {t_val}")
     else: w("None found.")
 
     section("HISTORY SCAN – COMMIT MESSAGES")
@@ -730,7 +939,14 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
     if tree_findings["current_secrets"]:
         for s in tree_findings["current_secrets"]:
             m_val = redact_match(s['match']) if mask else s['match']
-            w(f"[{s['type']}] {s['file']} -> {m_val}")
+            w(f"[{s['type']}] {s['file']}:{s.get('line', '?')} -> {m_val}")
+            if context_lines > 0 and s.get('line'):
+                context = get_context_snippet(s['file'], s['line'], context_lines)
+                if context:
+                    if mask:
+                        context = context.replace(s['match'], redact_match(s['match']))
+                    w(context)
+                    w()
     else: w("No secrets found in current files.")
 
     if tree_findings["nlp_pii"]:
@@ -764,6 +980,26 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
         for f in gitignore_suggestions:
             w(f"- {f}")
         w("\nIt is highly recommended to add these to your .gitignore file to prevent accidental leaks.")
+
+    # Safety score
+    if show_score:
+        score = 100
+        score -= (len(history_findings["secrets"]) + len(tree_findings["current_secrets"])) * 40
+        score -= (len(history_findings["pii"]) + len(tree_findings["nlp_pii"]) + len(ps_findings)) * 20
+        score -= len(history_findings["entropy"]) * 10
+        score = max(0, min(100, score))
+        
+        section("SECURITY SUMMARY & SAFE-TO-SHARE SCORE")
+        risk_label = "GREEN (Safe to Share)"
+        if score < 50:
+            risk_label = "RED (High Risk - Do Not Share)"
+        elif score < 90:
+            risk_label = "YELLOW (Medium Risk - Inspect Before Sharing)"
+            
+        w(f"Confidence Score: {score}/100 - {risk_label}")
+        w(f"- Leaked Secrets: {len(history_findings['secrets']) + len(tree_findings['current_secrets'])}")
+        w(f"- PII Detections: {len(history_findings['pii']) + len(tree_findings['nlp_pii']) + len(ps_findings)}")
+        w(f"- High Entropy Tokens: {len(history_findings['entropy'])}")
 
     # LLM Remediation Prompt Section
     section("LLM REMEDIATION PROMPTS")
@@ -844,6 +1080,10 @@ if __name__ == "__main__":
     parser.add_argument("--text", help="Scan the text snippet provided in this argument")
     parser.add_argument("--mask", action="store_true", help="Redact all matched secrets in output files/stdout")
     parser.add_argument("--entropy-threshold", type=float, default=3.8, help="Threshold for Shannon entropy (default: 3.8)")
+    parser.add_argument("--sensitive-words", help="Comma-separated list of sensitive words to scan for")
+    parser.add_argument("--extract-code-blocks", action="store_true", help="Extract and scan only code blocks from Markdown files/snippets")
+    parser.add_argument("--context-lines", type=int, default=0, help="Number of surrounding lines of context to print in text report")
+    parser.add_argument("--confidence-score", action="store_true", help="Calculate and print a 'Safe-to-Share' confidence score (0-100)")
     args = parser.parse_args()
 
     if args.install_hook or args.install_hook_strict:
@@ -880,6 +1120,10 @@ fi
     # Load .secretsignore if present
     ignore_files, ignore_tokens = load_secretsignore(repo_dir)
 
+    sensitive_words = []
+    if args.sensitive_words:
+        sensitive_words = [w.strip() for w in args.sensitive_words.split(",") if w.strip()]
+
     # Snippet / Stdin scan mode
     if args.stdin or args.text:
         content = ""
@@ -890,7 +1134,7 @@ fi
             content = args.text
             source = "text_snippet"
 
-        snippet_findings = scan_snippet(content, source, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens)
+        snippet_findings = scan_snippet(content, source, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens, extract_code_blocks=args.extract_code_blocks, sensitive_words=sensitive_words)
         
         # Format snippet findings to match generate_report expected structure
         history_findings = {
@@ -906,7 +1150,7 @@ fi
         }
         ps_findings = []
         
-        total_issues = generate_report(history_findings, tree_findings, ps_findings, args.output, args.format, mask=args.mask)
+        total_issues = generate_report(history_findings, tree_findings, ps_findings, args.output, args.format, mask=args.mask, context_lines=args.context_lines, show_score=args.confidence_score, snippet_content=content)
         sys.exit(1 if total_issues > 0 else 0)
 
     nlp_deidentifier = None
@@ -926,10 +1170,10 @@ fi
     # Add files from .secretsignore to exclusion list
     EXCLUDE_PATTERNS.extend(ignore_files)
 
-    history_findings = scan_history(EXCLUDE_PATTERNS, args.all_branches, quiet=args.quiet, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens)
-    tree_findings = scan_current_tree(repo_dir, EXCLUDE_PATTERNS, nlp_deidentifier, quiet=args.quiet, ignore_tokens=ignore_tokens)
+    history_findings = scan_history(EXCLUDE_PATTERNS, args.all_branches, quiet=args.quiet, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words)
+    tree_findings = scan_current_tree(repo_dir, EXCLUDE_PATTERNS, nlp_deidentifier, quiet=args.quiet, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words, extract_code_blocks=args.extract_code_blocks)
     
-    total_issues = generate_report(history_findings, tree_findings, ps_findings, args.output, args.format, mask=args.mask)
+    total_issues = generate_report(history_findings, tree_findings, ps_findings, args.output, args.format, mask=args.mask, context_lines=args.context_lines, show_score=args.confidence_score)
 
     # Automated git filter-repo Generator
     if args.generate_filter_repo:
