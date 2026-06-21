@@ -64,6 +64,8 @@ CUSTOM_PII_PATTERNS = {
     "SSN (US)": r"(?!000|666|9\d{2})\d{3}[-\s]?(?!00)\d{2}[-\s]?(?!0000)\d{4}",
     "Street Address (simple)": r"\d{1,5}\s[A-Za-z0-9\s]+(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Court|Ct)\b",
     "Zip Code (US)": r"\b\d{5}(-\d{4})?\b",
+    "Credit Card": r"\b(?:4[0-9]{3}(?:[-\s]?[0-9]{4}){3}|(?:5[1-5][0-9]{2}|222[1-9]|22[3-9][0-9]|2[3-6][0-9]{2}|27[01][0-9]|2720)[-\s]?[0-9]{4}[-\s]?[0-9]{4}[-\s]?[0-9]{4}|3[47][0-9]{2}[-\s]?[0-9]{6}[-\s]?[0-9]{5}|6(?:011|5[0-9]{2})[-\s]?[0-9]{4}[-\s]?[0-9]{4}[-\s]?[0-9]{4})\b",
+    "IBAN": r"\b[A-Z]{2}\d{2}(?:[-\s]?[A-Z0-9]){12,30}\b",
 }
 
 AI_PATTERNS = {
@@ -366,7 +368,7 @@ def scan_commit_messages(all_branches=False):
             commit_hash, message = parts
             yield commit_hash.strip(), message.strip()
 
-def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entropy_threshold=3.8, ignore_tokens=None, sensitive_words=None) -> dict:
+def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entropy_threshold=3.8, ignore_tokens=None, sensitive_words=None, since=None) -> dict:
     if ignore_tokens is None:
         ignore_tokens = []
     if sensitive_words is None:
@@ -387,8 +389,13 @@ def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entrop
     if not quiet:
         print(f"Scanning file history{' (all branches)' if all_branches else ''}...", file=sys.stderr)
     cmd = ["git", "log", "-p", "--no-color"]
+    if since:
+        if any(x in since for x in ('-', '/', ':', 'ago', 'week', 'day', 'month', 'year')):
+            cmd.append(f"--since={since}")
+        else:
+            cmd.append(f"{since}..")
     if all_branches:
-        cmd.insert(2, "--all")
+        cmd.append("--all")
     result = subprocess.run(
         cmd,
         capture_output=True, text=True, errors="replace"
@@ -487,6 +494,80 @@ def scan_history(exclude_patterns: list, all_branches=False, quiet=False, entrop
 
     return findings
 
+def scan_reflog(exclude_patterns: list, quiet=False, entropy_threshold=3.8, ignore_tokens=None, sensitive_words=None) -> dict:
+    if ignore_tokens is None:
+        ignore_tokens = []
+    if sensitive_words is None:
+        sensitive_words = []
+    findings = {
+        "secrets": [],
+        "pii": [],
+        "entropy": [],
+    }
+    
+    # Check if .git exists to avoid failure if running outside git
+    if not Path(".git").exists() and not Path("../.git").exists():
+        return findings
+
+    if not quiet:
+        print("Scanning Git reflog history...", file=sys.stderr)
+        
+    cmd = ["git", "reflog", "show", "--all", "-p", "--no-color"]
+    result = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+    if result.returncode != 0:
+        return findings
+
+    added_lines = extract_added_lines(result.stdout, exclude_patterns)
+    all_secret_patterns = {**CUSTOM_SECRET_PATTERNS, **GITROB_CONTENT_PATTERNS, **AI_PATTERNS}
+
+    for file_path, line_no, content in added_lines:
+        reflog_path = f"reflog:{file_path}"
+        
+        for name, pattern in all_secret_patterns.items():
+            try:
+                for m in re.finditer(pattern, content):
+                    val = m.group(0).strip()
+                    if val in ignore_tokens: continue
+                    findings["secrets"].append({"type": name, "file": reflog_path, "line": line_no, "match": val})
+            except re.error:
+                pass
+                
+        obf_hits = scan_obfuscated_secrets(content, reflog_path, all_secret_patterns)
+        for hit in obf_hits:
+            if hit["match"] not in ignore_tokens:
+                hit["line"] = line_no
+                findings["secrets"].append(hit)
+                
+        for word in sensitive_words:
+            if word.lower() in content.lower():
+                for m in re.finditer(re.escape(word), content, re.IGNORECASE):
+                    val = m.group(0)
+                    if val not in ignore_tokens:
+                        findings["secrets"].append({
+                            "type": f"Sensitive Word: {word}",
+                            "file": reflog_path,
+                            "line": line_no,
+                            "match": val
+                        })
+                        
+        for name, pattern in CUSTOM_PII_PATTERNS.items():
+            for m in re.finditer(pattern, content):
+                val = m.group(0).strip()
+                if val in ignore_tokens: continue
+                findings["pii"].append({"type": name, "file": reflog_path, "line": line_no, "match": val})
+                
+        candidates = re.finditer(r"\b[A-Za-z0-9_\-]{16,}\b", content)
+        for m in candidates:
+            token = m.group(0)
+            if token.isdigit(): continue
+            if is_ignored_entropy_token(token): continue
+            if token in ignore_tokens: continue
+            entropy = shannon_entropy(token)
+            if entropy >= entropy_threshold:
+                findings["entropy"].append({"file": reflog_path, "line": line_no, "token": token, "entropy": round(entropy, 2)})
+
+    return findings
+
 def scan_text(text, source_identifier, all_secret_patterns):
     local_hits = []
     for name, pattern in all_secret_patterns.items():
@@ -517,6 +598,94 @@ def scan_ipynb(path, all_secret_patterns):
 # ------------------------------------------------------------------------------
 # NLP & PowerShell Integrations
 # ------------------------------------------------------------------------------
+
+def redact_file_content(content: str, sensitive_words=None) -> str:
+    if sensitive_words is None:
+        sensitive_words = []
+    all_secret_patterns = {**CUSTOM_SECRET_PATTERNS, **GITROB_CONTENT_PATTERNS, **AI_PATTERNS}
+    
+    replacements = [] # list of tuple (start, end, redacted_val)
+    
+    # Standard Secrets
+    for name, pattern in all_secret_patterns.items():
+        try:
+            for m in re.finditer(pattern, content):
+                replacements.append((m.start(), m.end(), redact_match(m.group(0))))
+        except re.error:
+            pass
+            
+    # Obfuscated Base64 Secrets
+    candidates = re.finditer(r"\b[A-Za-z0-9+/]{24,}={0,2}\b", content)
+    import base64
+    for m in candidates:
+        token = m.group(0)
+        try:
+            pad_len = 4 - (len(token) % 4)
+            token_padded = token + ("=" * pad_len) if pad_len < 4 else token
+            decoded_bytes = base64.b64decode(token_padded)
+            decoded_text = decoded_bytes.decode('utf-8', errors='strict')
+            if len(decoded_text) > 10 and all(32 <= ord(c) < 127 or c in "\r\n\t" for c in decoded_text):
+                found_inner = False
+                for name, pattern in all_secret_patterns.items():
+                    if re.search(pattern, decoded_text):
+                        found_inner = True
+                        break
+                if found_inner:
+                    replacements.append((m.start(), m.end(), redact_match(token)))
+        except Exception:
+            pass
+
+    # Sensitive Words
+    for word in sensitive_words:
+        for m in re.finditer(re.escape(word), content, re.IGNORECASE):
+            replacements.append((m.start(), m.end(), redact_match(m.group(0))))
+            
+    # Regex PII
+    for name, pattern in CUSTOM_PII_PATTERNS.items():
+        for m in re.finditer(pattern, content):
+            replacements.append((m.start(), m.end(), redact_match(m.group(0))))
+
+    # Sort replacements by start offset descending, and resolve overlaps
+    replacements.sort(key=lambda x: (x[0], -x[1]))
+    
+    filtered = []
+    last_end = -1
+    for start, end, red_val in replacements:
+        if start >= last_end:
+            filtered.append((start, end, red_val))
+            last_end = end
+            
+    chars = list(content)
+    for start, end, red_val in sorted(filtered, key=lambda x: x[0], reverse=True):
+        chars[start:end] = list(red_val)
+        
+    return "".join(chars)
+
+def redact_file_in_place(filepath: str, sensitive_words=None) -> bool:
+    try:
+        path = Path(filepath)
+        if not path.exists():
+            print(f"Error: File {filepath} does not exist.", file=sys.stderr)
+            return False
+        if path.stat().st_size > 1_000_000:
+            print(f"Error: File {filepath} is too large (>1MB). Skipping redaction.", file=sys.stderr)
+            return False
+            
+        content = path.read_text(encoding="utf-8", errors="ignore")
+        redacted = redact_file_content(content, sensitive_words)
+        
+        backup_path = path.with_suffix(path.suffix + ".bak")
+        try:
+            backup_path.write_text(content, encoding="utf-8")
+        except Exception:
+            pass
+            
+        path.write_text(redacted, encoding="utf-8")
+        print(f"Successfully redacted {filepath} (backup saved as {backup_path.name})")
+        return True
+    except Exception as e:
+        print(f"Error redacting file {filepath}: {e}", file=sys.stderr)
+        return False
 
 def init_nlp_deidentifier(quiet=False):
     try:
@@ -1248,7 +1417,7 @@ def view_findings_menu(findings, state, snippet_content=None):
         print("\033[1;36m============================================================\033[0m")
         print(f"Safety Score: {risk_color}{score}/100 - {risk_label}\033[0m")
         print(f"Detections: Secrets={history_secrets_count+tree_secrets_count} PII={pii_count} High-Entropy={entropy_count}\n")
-        print("Use UP/DOWN arrow keys to navigate, ESC/Q to return.\n")
+        print("Use UP/DOWN arrow keys to navigate, R to generate filter-repo scrub commands, ESC/Q to return.\n")
         
         if selected < scroll_offset:
             scroll_offset = selected
@@ -1302,6 +1471,45 @@ def view_findings_menu(findings, state, snippet_content=None):
             selected = (selected - 1) % len(findings)
         elif key == 'down':
             selected = (selected + 1) % len(findings)
+        elif key == 'r':
+            clear_screen()
+            print("\033[1;36m============================================================\033[0m")
+            print("\033[1;36m  GENERATING SCRUB REMEDIATION COMMAND...\033[0m")
+            print("\033[1;36m============================================================\033[0m")
+            
+            unique_secrets = set(f["match"] for f in findings)
+            unique_secrets = {sec.strip() for sec in unique_secrets if sec.strip()}
+            
+            if unique_secrets:
+                with open("replacements.txt", "w", encoding="utf-8") as f_out:
+                    for sec in sorted(unique_secrets):
+                        f_out.write(f"{sec}==>[REDACTED]\n")
+                print(f"Generated replacements.txt with {len(unique_secrets)} unique secrets.")
+                
+                gitignore_path = Path(".gitignore")
+                add_to_git = True
+                if gitignore_path.exists():
+                    try:
+                        lines = gitignore_path.read_text(encoding="utf-8").splitlines()
+                        if any("replacements.txt" in line for line in lines):
+                            add_to_git = False
+                    except Exception:
+                        pass
+                if add_to_git:
+                    try:
+                        with open(gitignore_path, "a", encoding="utf-8") as f_git:
+                            f_git.write("\n# Omni-Secret-Scanner filter-repo replacements\nreplacements.txt\n")
+                        print("Added replacements.txt to .gitignore")
+                    except Exception:
+                        pass
+                
+                print("\nTo scrub these secrets from your repository history, run this command:")
+                print("  \033[1;32mgit filter-repo --replace-text replacements.txt --force\033[0m")
+            else:
+                print("No credentials or PII were found to redact.")
+                
+            print("\nPress any key to return to results...")
+            get_key()
         elif key in ('escape', 'q'):
             break
 
@@ -1316,6 +1524,8 @@ def configure_settings_menu(state):
             f"Enable NLP (spaCy): [{'ENABLED' if state['nlp_pii'] else 'DISABLED'}]",
             f"Enable PowerShell Crosscheck: [{'ENABLED' if state['ps_crosscheck'] else 'DISABLED'}]",
             f"Extract Code Blocks: [{'ENABLED' if state['extract_code_blocks'] else 'DISABLED'}]",
+            f"Enable Reflog Scan: [{'ENABLED' if state['reflog'] else 'DISABLED'}]",
+            f"Since Limit: [{state['since'] if state['since'] else '(all)'}]",
             "Go Back to Main Menu"
         ]
         menu_picker("SETTINGS CONFIGURATION", options, selected)
@@ -1354,6 +1564,12 @@ def configure_settings_menu(state):
             elif selected == 6:
                 state['extract_code_blocks'] = not state['extract_code_blocks']
             elif selected == 7:
+                state['reflog'] = not state['reflog']
+            elif selected == 8:
+                clear_screen()
+                val = input(f"Enter new Since Limit (e.g. HEAD~3, 2026-06-01, empty for all; current: {state['since'] or '(all)'}): ").strip()
+                state['since'] = val if val else None
+            elif selected == 9:
                 break
 
 def run_tui_repo_scan(state):
@@ -1384,8 +1600,14 @@ def run_tui_repo_scan(state):
         ps_findings = run_ps_crosscheck(state["repo_dir"], quiet=True, ignore_tokens=ignore_tokens)
         
     print("Scanning Git history...")
-    history_findings = scan_history(EXCLUDE_PATTERNS, all_branches=False, quiet=True, entropy_threshold=state["entropy_threshold"], ignore_tokens=ignore_tokens, sensitive_words=state["sensitive_words"])
-    
+    history_findings = scan_history(EXCLUDE_PATTERNS, all_branches=False, quiet=True, entropy_threshold=state["entropy_threshold"], ignore_tokens=ignore_tokens, sensitive_words=state["sensitive_words"], since=state["since"])
+    if state["reflog"]:
+        print("Scanning Git reflog history...")
+        reflog_findings = scan_reflog(EXCLUDE_PATTERNS, quiet=True, entropy_threshold=state["entropy_threshold"], ignore_tokens=ignore_tokens, sensitive_words=state["sensitive_words"])
+        history_findings["secrets"].extend(reflog_findings["secrets"])
+        history_findings["pii"].extend(reflog_findings["pii"])
+        history_findings["entropy"].extend(reflog_findings["entropy"])
+        
     print("Scanning current files...")
     tree_findings = scan_current_tree(state["repo_dir"], EXCLUDE_PATTERNS, nlp_deidentifier, quiet=True, ignore_tokens=ignore_tokens, sensitive_words=state["sensitive_words"], extract_code_blocks=state["extract_code_blocks"])
     
@@ -1497,6 +1719,26 @@ def run_tui_load_report(state):
         print("\nPress any key to return to Main Menu...")
         get_key()
 
+def run_tui_redact_file(state):
+    clear_screen()
+    print("\033[1;36m============================================================\033[0m")
+    print("\033[1;36m  REDACT LOCAL FILE\033[0m")
+    print("\033[1;36m============================================================\033[0m")
+    filepath = input("Enter path to file you want to redact (or press Enter to cancel): ").strip()
+    if not filepath:
+        return
+        
+    clear_screen()
+    print(f"Redacting file {filepath}...")
+    success = redact_file_in_place(filepath, state["sensitive_words"])
+    if success:
+        print("\n\033[1;32mRedaction completed successfully!\033[0m")
+    else:
+        print("\n\033[1;31mRedaction failed. Please check file path and size.\033[0m")
+        
+    print("\nPress any key to return to Main Menu...")
+    get_key()
+
 def run_tui(args):
     state = {
         "mask": args.mask,
@@ -1506,7 +1748,9 @@ def run_tui(args):
         "repo_dir": os.getcwd(),
         "extract_code_blocks": args.extract_code_blocks,
         "nlp_pii": args.nlp_pii,
-        "ps_crosscheck": args.ps_crosscheck
+        "ps_crosscheck": args.ps_crosscheck,
+        "reflog": args.reflog,
+        "since": args.since
     }
     
     selected = 0
@@ -1514,6 +1758,7 @@ def run_tui(args):
         "Scan Current Repository",
         "Scan Text Snippet",
         "View Last Report (report.json)",
+        "Redact Local File",
         "Configure Settings",
         "Exit"
     ]
@@ -1539,8 +1784,10 @@ def run_tui(args):
             elif selected == 2:
                 run_tui_load_report(state)
             elif selected == 3:
-                configure_settings_menu(state)
+                run_tui_redact_file(state)
             elif selected == 4:
+                configure_settings_menu(state)
+            elif selected == 5:
                 clear_screen()
                 print("Exiting...")
                 break
@@ -1566,7 +1813,17 @@ if __name__ == "__main__":
     parser.add_argument("--context-lines", type=int, default=0, help="Number of surrounding lines of context to print in text report")
     parser.add_argument("--confidence-score", action="store_true", help="Calculate and print a 'Safe-to-Share' confidence score (0-100)")
     parser.add_argument("--tui", action="store_true", help="Start the interactive terminal user interface")
+    parser.add_argument("--since", help="Incremental scan start commit/date (e.g. HEAD~3, 2026-06-01)")
+    parser.add_argument("--reflog", action="store_true", help="Scan git reflog for force-pushed commits")
+    parser.add_argument("--redact-file", help="Redact all secrets and PII from a local file in-place")
     args = parser.parse_args()
+
+    if args.redact_file:
+        sensitive_words = []
+        if args.sensitive_words:
+            sensitive_words = [w.strip() for w in args.sensitive_words.split(",") if w.strip()]
+        success = redact_file_in_place(args.redact_file, sensitive_words)
+        sys.exit(0 if success else 1)
 
     if args.tui:
         run_tui(args)
@@ -1656,7 +1913,13 @@ fi
     # Add files from .secretsignore to exclusion list
     EXCLUDE_PATTERNS.extend(ignore_files)
 
-    history_findings = scan_history(EXCLUDE_PATTERNS, args.all_branches, quiet=args.quiet, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words)
+    history_findings = scan_history(EXCLUDE_PATTERNS, args.all_branches, quiet=args.quiet, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words, since=args.since)
+    if args.reflog:
+        reflog_findings = scan_reflog(EXCLUDE_PATTERNS, quiet=args.quiet, entropy_threshold=args.entropy_threshold, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words)
+        history_findings["secrets"].extend(reflog_findings["secrets"])
+        history_findings["pii"].extend(reflog_findings["pii"])
+        history_findings["entropy"].extend(reflog_findings["entropy"])
+        
     tree_findings = scan_current_tree(repo_dir, EXCLUDE_PATTERNS, nlp_deidentifier, quiet=args.quiet, ignore_tokens=ignore_tokens, sensitive_words=sensitive_words, extract_code_blocks=args.extract_code_blocks)
     
     total_issues = generate_report(history_findings, tree_findings, ps_findings, args.output, args.format, mask=args.mask, context_lines=args.context_lines, show_score=args.confidence_score)
