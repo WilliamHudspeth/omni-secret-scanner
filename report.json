@@ -1,0 +1,557 @@
+{
+  "scan_time": "2026-06-21T18:06:47.327243",
+  "summary": {
+    "total_issues": 104,
+    "has_secrets": true,
+    "has_pii": true
+  },
+  "findings": {
+    "history": {
+      "secrets": [
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "line": 245,
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "line": 247,
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "line": 27,
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "line": 29,
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Bearer Token",
+          "file": "scan-secrets.py",
+          "line": 100,
+          "match": "Bearer Token"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "line": 103,
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "line": 105,
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "line": 268,
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "line": 270,
+          "match": "----------------------------------------"
+        }
+      ],
+      "pii": [
+        {
+          "type": "Phone Number (US)",
+          "file": "scan-secrets.py",
+          "line": 189,
+          "match": "0123456789"
+        }
+      ],
+      "entropy": [
+        {
+          "file": "scan-secrets.py",
+          "line": 189,
+          "token": "0123456789abcdefABCDEF",
+          "entropy": 4.46
+        }
+      ],
+      "commits": []
+    },
+    "current_tree": {
+      "suspicious_files": [],
+      "current_secrets": [
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": "scan-secrets.py",
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Snowflake Password",
+          "file": "scan-secrets.py",
+          "match": "Snowflake Password\": r\"(?i)snowflake.*password.*['\\\"][^'\\\"]+['\\\"]\",\n    \""
+        },
+        {
+          "type": "Bearer Token",
+          "file": "scan-secrets.py",
+          "match": "Bearer Token"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": "scan-secrets.py",
+          "match": "0123456789"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\hooks\\pre-rebase.sample",
+          "match": "---o---o---o---o---o---o---o---o---o---o"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\hooks\\sendemail-validate.sample",
+          "match": "----------------------------------------"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\logs\\HEAD",
+          "match": "0000000000000000000000000000000000000000"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\logs\\HEAD",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\logs\\HEAD",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\logs\\HEAD",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\logs\\HEAD",
+          "match": "0000000000000000000000000000000000000000"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\logs\\HEAD",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\logs\\HEAD",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\logs\\HEAD",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\logs\\HEAD",
+          "match": "00000000000000000000000000000000"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\logs\\HEAD",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\logs\\HEAD",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\logs\\HEAD",
+          "match": "378143c5c9eb87628e9da5fd75c3740e"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\logs\\HEAD",
+          "match": "0000000000000000000000000000000000000000"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\logs\\HEAD",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\logs\\HEAD",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\logs\\HEAD",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "PII:Email Address",
+          "file": ".git\\logs\\HEAD",
+          "match": "you@example.com"
+        },
+        {
+          "type": "PII:Email Address",
+          "file": ".git\\logs\\HEAD",
+          "match": "you@example.com"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\HEAD",
+          "match": "0000000000"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\HEAD",
+          "match": "0000000000"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\HEAD",
+          "match": "0000000000"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\HEAD",
+          "match": "0000000000"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\HEAD",
+          "match": "1782077770"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\HEAD",
+          "match": "1782079016"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "0000000000000000000000000000000000000000"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "0000000000000000000000000000000000000000"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "00000000000000000000000000000000"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "0000000000000000000000000000000000000000"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "PII:Email Address",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "you@example.com"
+        },
+        {
+          "type": "PII:Email Address",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "you@example.com"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "0000000000"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "0000000000"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "0000000000"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "0000000000"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "1782077770"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\refs\\heads\\master",
+          "match": "1782079016"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "0000000000000000000000000000000000000000"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "0000000000000000000000000000000000000000"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "00000000000000000000000000000000"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "0000000000000000000000000000000000000000"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "afa37fd0d747dda7ce48d9ccb068e93a0be2de66"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "PII:Email Address",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "you@example.com"
+        },
+        {
+          "type": "PII:Email Address",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "you@example.com"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "0000000000"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "0000000000"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "0000000000"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "0000000000"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "1782077778"
+        },
+        {
+          "type": "PII:Phone Number (US)",
+          "file": ".git\\logs\\refs\\remotes\\origin\\master",
+          "match": "1782079213"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\refs\\heads\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\refs\\heads\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\refs\\heads\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\refs\\heads\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "Cloudflare API Key",
+          "file": ".git\\refs\\remotes\\origin\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "AWS Secret Key",
+          "file": ".git\\refs\\remotes\\origin\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        },
+        {
+          "type": "Twilio Auth Token",
+          "file": ".git\\refs\\remotes\\origin\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e"
+        },
+        {
+          "type": "Twitter OAuth Secret",
+          "file": ".git\\refs\\remotes\\origin\\master",
+          "match": "378143c5c9eb87628e9da5fd75c3740e6358ff9a"
+        }
+      ],
+      "nlp_pii": []
+    },
+    "powershell_crosscheck": []
+  }
+}

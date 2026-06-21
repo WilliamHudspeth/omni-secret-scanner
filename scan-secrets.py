@@ -25,6 +25,7 @@ import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
+from datetime import datetime
 
 # ------------------------------------------------------------------------------
 # CONFIGURATION – Custom & Gitrob & Wiz AI patterns
@@ -41,6 +42,11 @@ CUSTOM_SECRET_PATTERNS = {
     "Slack Token": r"xox[baprs]-[A-Za-z0-9\-_]+",
     "Stripe Key": r"(sk|rk)_(live|test)_[A-Za-z0-9]+",
     "Generic Password Assignment": r"(?i)(password|passwd|pwd)\s*[:=]\s*['\"]([^'\"]+)['\"]",
+    "Vercel Token": r"vercel_[A-Za-z0-9]{24,}",
+    "Supabase Token": r"sbp_[a-zA-Z0-9]{40}",
+    "Cloudflare API Key": r"[a-zA-Z0-9_\-]{40}",
+    "Snowflake Password": r"(?i)snowflake.*password.*['\"][^'\"]+['\"]",
+    "Datadog API Key": r"(?i)datadog.*['\"][a-f0-9]{32}['\"]",
 }
 
 CUSTOM_PII_PATTERNS = {
@@ -141,8 +147,10 @@ def extract_added_lines(patch_text: str, exclude_patterns: list) -> list:
                 line_no += 1
     return records
 
-def scan_commit_messages():
+def scan_commit_messages(all_branches=False):
     cmd = ["git", "log", "--pretty=format:%H%n%B%n---END---"]
+    if all_branches:
+        cmd.insert(2, "--all")
     result = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
     if result.returncode != 0:
         print("Error running git log for commits", file=sys.stderr)
@@ -156,7 +164,7 @@ def scan_commit_messages():
             commit_hash, message = parts
             yield commit_hash.strip(), message.strip()
 
-def scan_history(exclude_patterns: list) -> dict:
+def scan_history(exclude_patterns: list, all_branches=False) -> dict:
     findings = {
         "secrets": [],
         "pii": [],
@@ -169,9 +177,12 @@ def scan_history(exclude_patterns: list) -> dict:
         print("Warning: Not running inside a Git repository. Skipping history scan.", file=sys.stderr)
         return findings
 
-    print("Scanning file history...", file=sys.stderr)
+    print(f"Scanning file history{' (all branches)' if all_branches else ''}...", file=sys.stderr)
+    cmd = ["git", "log", "-p", "--no-color"]
+    if all_branches:
+        cmd.insert(2, "--all")
     result = subprocess.run(
-        ["git", "log", "-p", "--no-color"],
+        cmd,
         capture_output=True, text=True, errors="replace"
     )
     if result.returncode != 0:
@@ -201,7 +212,7 @@ def scan_history(exclude_patterns: list) -> dict:
                 findings["entropy"].append({"file": file_path, "line": line_no, "token": token, "entropy": round(entropy, 2)})
 
     print("Scanning commit messages...", file=sys.stderr)
-    for commit_hash, message in scan_commit_messages():
+    for commit_hash, message in scan_commit_messages(all_branches):
         for name, pattern in all_secret_patterns.items():
             for m in re.finditer(pattern, message):
                 findings["commits"].append({"type": name, "commit": commit_hash[:8], "match": m.group(0).strip()})
@@ -382,7 +393,91 @@ def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=No
 # ------------------------------------------------------------------------------
 # Report generation
 # ------------------------------------------------------------------------------
-def print_report(history_findings: dict, tree_findings: dict, ps_findings: list, output_file=None):
+def generate_report(history_findings: dict, tree_findings: dict, ps_findings: list, output_file=None, output_format="text"):
+    has_secrets = len(history_findings["secrets"]) > 0 or len(tree_findings["current_secrets"]) > 0
+    has_pii = len(history_findings["pii"]) > 0 or len(tree_findings["nlp_pii"]) > 0 or len(ps_findings) > 0
+    total_issues = (
+        len(history_findings["secrets"]) + len(history_findings["pii"]) + len(history_findings["entropy"]) +
+        len(history_findings["commits"]) + len(tree_findings["current_secrets"]) + len(tree_findings["nlp_pii"]) +
+        len(ps_findings)
+    )
+
+    if output_format == "json":
+        report = {
+            "scan_time": datetime.now().isoformat(),
+            "summary": {
+                "total_issues": total_issues,
+                "has_secrets": has_secrets,
+                "has_pii": has_pii
+            },
+            "findings": {
+                "history": history_findings,
+                "current_tree": tree_findings,
+                "powershell_crosscheck": ps_findings
+            }
+        }
+        json_out = json.dumps(report, indent=2)
+        if output_file:
+            with open(output_file, "w") as f:
+                f.write(json_out)
+            print(f"JSON report saved to {output_file}")
+        else:
+            print(json_out)
+        return total_issues
+
+    elif output_format == "sarif":
+        sarif = {
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [
+                {
+                    "tool": {
+                        "driver": {
+                            "name": "omni-secret-scanner",
+                            "informationUri": "https://github.com/WilliamHudspeth/omni-secret-scanner",
+                            "rules": [
+                                {
+                                    "id": "OSS001",
+                                    "name": "SecretFound",
+                                    "shortDescription": {"text": "A hardcoded secret was found."}
+                                },
+                                {
+                                    "id": "OSS002",
+                                    "name": "PIIFound",
+                                    "shortDescription": {"text": "Personally Identifiable Information was found."}
+                                }
+                            ]
+                        }
+                    },
+                    "results": []
+                }
+            ]
+        }
+        
+        # Add basic results to SARIF
+        for s in tree_findings["current_secrets"]:
+            sarif["runs"][0]["results"].append({
+                "ruleId": "OSS001" if not str(s["type"]).startswith("PII") else "OSS002",
+                "message": {"text": f"Found {s['type']} in current tree"},
+                "locations": [{"physicalLocation": {"artifactLocation": {"uri": s["file"]}}}]
+            })
+        for s in history_findings["secrets"]:
+            sarif["runs"][0]["results"].append({
+                "ruleId": "OSS001",
+                "message": {"text": f"Found {s['type']} in git history"},
+                "locations": [{"physicalLocation": {"artifactLocation": {"uri": s["file"]}}}]
+            })
+            
+        json_out = json.dumps(sarif, indent=2)
+        if output_file:
+            with open(output_file, "w") as f:
+                f.write(json_out)
+            print(f"SARIF report saved to {output_file}")
+        else:
+            print(json_out)
+        return total_issues
+
+    # Fallback to text format
     out = []
     def w(txt=""): out.append(txt)
     def section(title):
@@ -481,13 +576,59 @@ def print_report(history_findings: dict, tree_findings: dict, ps_findings: list,
         with open(output_file, "w") as f: f.write(report)
         print(f"\nReport saved to {output_file}")
 
+    return total_issues
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Full repository secret scanner")
     parser.add_argument("--repo-dir", help="Path to git repository (default: current dir)")
     parser.add_argument("--output", help="Save report to file (default: stdout only)")
     parser.add_argument("--nlp-pii", action="store_true", help="Enable heavy NLP scanning for Names/Pronouns via spaCy")
     parser.add_argument("--ps-crosscheck", action="store_true", help="Enable PowerShell cross-checking for SSNs and common keys")
+    parser.add_argument("--all-branches", action="store_true", help="Scan all git branches and history")
+    parser.add_argument("--format", choices=["text", "json", "sarif"], default="text", help="Output format")
+    parser.add_argument("--install-hook", action="store_true", help="Install standard fast pre-commit hook")
+    parser.add_argument("--install-hook-strict", action="store_true", help="Install strict pre-commit hook (runs NLP and PowerShell crosscheck)")
     args = parser.parse_args()
+
+    if args.install_hook or args.install_hook_strict:
+        hook_path = Path(".git/hooks/pre-commit")
+        if not Path(".git").exists():
+            print("Error: Must run from the root of a git repository to install hooks.")
+            sys.exit(1)
+        
+        # Build the command based on strictness
+        cmd_args = ""
+        if args.install_hook_strict:
+            cmd_args = " --nlp-pii --ps-crosscheck"
+            
+        hook_content = f"""#!/usr/bin/env bash
+echo "Running omni-secret-scanner..."
+python scan-secrets.py{{cmd_args}}
+if [ $? -ne 0 ]; then
+    echo "❌ Secrets or PII detected! Commit blocked."
+    exit 1
+fi
+"""
+        # Note: escaping the curly braces around cmd_args because f-string was used above incorrectly
+        # Actually I just used {{ and }} inside the raw string if I used format, but I used f-string, so it should be {cmd_args}
+        hook_content = f"""#!/usr/bin/env bash
+echo "Running omni-secret-scanner..."
+python scan-secrets.py{cmd_args}
+if [ $? -ne 0 ]; then
+    echo "❌ Secrets or PII detected! Commit blocked."
+    exit 1
+fi
+"""
+        hook_path.parent.mkdir(parents=True, exist_ok=True)
+        hook_path.write_text(hook_content, encoding="utf-8")
+        # Windows chmod is limited but works for basic executable bit in git bash/msys2
+        try:
+            hook_path.chmod(0o755)
+        except Exception:
+            pass
+        mode = "Strict" if args.install_hook_strict else "Standard"
+        print(f"{mode} pre-commit hook installed successfully at .git/hooks/pre-commit")
+        sys.exit(0)
 
     if args.repo_dir: os.chdir(args.repo_dir)
     repo_dir = os.getcwd()
@@ -507,6 +648,11 @@ if __name__ == "__main__":
         "build/", "__pycache__/", "*.pyc",
     ]
 
-    history_findings = scan_history(EXCLUDE_PATTERNS)
+    history_findings = scan_history(EXCLUDE_PATTERNS, args.all_branches)
     tree_findings = scan_current_tree(repo_dir, EXCLUDE_PATTERNS, nlp_deidentifier)
-    print_report(history_findings, tree_findings, ps_findings, args.output)
+    
+    total_issues = generate_report(history_findings, tree_findings, ps_findings, args.output, args.format)
+    
+    # Exit code > 0 if secrets/PII were found so pre-commit hooks can fail
+    if total_issues > 0:
+        sys.exit(1)
