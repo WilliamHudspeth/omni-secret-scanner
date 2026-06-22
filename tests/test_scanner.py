@@ -1046,3 +1046,132 @@ class TestStegoDetection:
         """Ensure we cover common image formats."""
         for ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif"):
             assert ext in _STEGO_EXTENSIONS
+
+
+# ==============================================================================
+# 25. Phase 12 — Performance: mmap I/O
+# ==============================================================================
+
+from omni_secret_scanner.utils.mmap_io import read_file_content, get_mmap_threshold
+
+
+class TestMmapIO:
+    """Tests for memory-mapped file reading."""
+
+    def test_read_small_file_no_mmap(self, tmp_path):
+        f = tmp_path / "small.txt"
+        f.write_text("hello world", encoding="utf-8")
+        content = read_file_content(str(f), use_mmap=False)
+        assert content == "hello world"
+
+    def test_read_small_file_with_mmap_falls_back(self, tmp_path):
+        f = tmp_path / "small.txt"
+        f.write_text("hello world", encoding="utf-8")
+        # Small files use regular read even with mmap enabled
+        content = read_file_content(str(f), use_mmap=True, threshold=1_000_000)
+        assert content == "hello world"
+
+    def test_read_nonexistent(self):
+        assert read_file_content("/nonexistent/file.txt") is None
+
+    def test_get_mmap_threshold_default(self):
+        assert get_mmap_threshold() == 1_000_000
+
+    def test_get_mmap_threshold_custom(self):
+        assert get_mmap_threshold(500_000) == 500_000
+
+
+# ==============================================================================
+# 26. Phase 12 — Performance: Combined Regex
+# ==============================================================================
+
+from omni_secret_scanner.patterns.combined import (
+    build_combined_pattern, combined_pattern_find, build_name_map,
+)
+
+
+class TestCombinedRegex:
+    """Tests for combined regex compilation."""
+
+    def test_build_combined_basic(self):
+        patterns = {"aws_key": r"AKIA[A-Z0-9]{16}", "gh_token": r"ghp_[A-Za-z0-9]{36}"}
+        combined = build_combined_pattern(patterns)
+        assert combined is not None
+
+    def test_combined_finds_match(self):
+        patterns = {"aws_key": r"AKIA[A-Z0-9]{16}", "gh_token": r"ghp_[A-Za-z0-9]{36}"}
+        combined = build_combined_pattern(patterns)
+        nm = build_name_map(patterns)
+        line = "key = 'AKIAIOSFODNN7EXAMPLE'"
+        results = combined_pattern_find(line, combined, nm)
+        assert len(results) == 1
+        assert results[0][0] == "aws_key"
+
+    def test_combined_finds_no_match(self):
+        patterns = {"aws_key": r"AKIA[A-Z0-9]{16}"}
+        combined = build_combined_pattern(patterns)
+        nm = build_name_map(patterns)
+        results = combined_pattern_find("safe code here", combined, nm)
+        assert len(results) == 0
+
+    def test_build_name_map(self):
+        patterns = {"AWS Access Key ID": r"AKIA[A-Z0-9]{16}"}
+        nm = build_name_map(patterns)
+        assert "AWS_Access_Key_ID" in nm
+        assert nm["AWS_Access_Key_ID"] == "AWS Access Key ID"
+
+    def test_build_combined_empty(self):
+        assert build_combined_pattern({}) is None
+
+
+# ==============================================================================
+# 27. Phase 12 — Performance: Disk Cache
+# ==============================================================================
+
+from omni_secret_scanner.utils.cache import ScanCache, get_file_hash
+
+
+class TestScanCache:
+    """Tests for disk-based file hash cache."""
+
+    def test_cache_init(self, tmp_path):
+        cache = ScanCache(str(tmp_path))
+        stats = cache.stats()
+        assert stats["total"] == 0
+        cache.close()
+
+    def test_get_file_hash(self, tmp_path):
+        f = tmp_path / "test.txt"
+        f.write_text("hello", encoding="utf-8")
+        h = get_file_hash(str(f))
+        assert len(h) == 64  # SHA-256 produces 64 hex chars
+        assert h == get_file_hash(str(f))  # deterministic
+
+    def test_should_scan_new_file(self, tmp_path):
+        cache = ScanCache(str(tmp_path))
+        f = tmp_path / "new.txt"
+        f.write_text("data", encoding="utf-8")
+        assert cache.should_scan(f) is True
+        # Second call should say no (already cached with same hash)
+        assert cache.should_scan(f) is False
+        cache.close()
+
+    def test_invalidate(self, tmp_path):
+        cache = ScanCache(str(tmp_path))
+        f = tmp_path / "data.txt"
+        f.write_text("v1", encoding="utf-8")
+        assert cache.should_scan(f) is True
+        assert cache.should_scan(f) is False  # cached
+        cache.invalidate(f)
+        assert cache.should_scan(f) is True  # forced re-scan
+        cache.close()
+
+    def test_clear(self, tmp_path):
+        cache = ScanCache(str(tmp_path))
+        f = tmp_path / "data.txt"
+        f.write_text("x", encoding="utf-8")
+        cache.should_scan(f)
+        assert cache.stats()["total"] >= 1
+        cache.clear()
+        assert cache.stats()["total"] == 0
+        cache.close()

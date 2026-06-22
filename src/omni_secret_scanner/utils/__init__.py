@@ -16,6 +16,8 @@ from .git import (
 )
 from .validation import SECRET_VALIDATORS, validate_secret
 from .homoglyph import deconfuse, deconfuse_and_match, is_suspicious_unicode
+from .mmap_io import read_file_content, get_mmap_threshold
+from .cache import ScanCache
 
 __all__ = [
     "shannon_entropy",

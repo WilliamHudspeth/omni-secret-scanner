@@ -23,10 +23,12 @@ from ..utils.git import (
     match_exclude,
 )
 from ..utils.homoglyph import deconfuse, deconfuse_and_match
+from ..utils.mmap_io import read_file_content
 from .snippet import scan_ipynb, scan_obfuscated_secrets, scan_pbix
 from .ast_filter import ast_context_filter
 from .stego import detect_lsb_steganography, is_stego_candidate
 from .taint import taint_analysis
+from ..patterns.combined import build_combined_pattern, combined_pattern_find, build_name_map
 
 
 def _scan_single_file(job: tuple) -> dict:
@@ -47,6 +49,9 @@ def _scan_single_file(job: tuple) -> dict:
         taint_enabled,
         stego_enabled,
         perplexity_model,
+        mmap_enabled,
+        combined_pattern,
+        name_map,
     ) = job
 
     lang_rules = get_lang_rules_for_file(file_rel_path, enabled=lang_rules_enabled)
@@ -108,7 +113,9 @@ def _scan_single_file(job: tuple) -> dict:
         return result
 
     try:
-        content = path.read_text(errors="ignore")
+        content = read_file_content(str(path), use_mmap=mmap_enabled) if mmap_enabled else path.read_text(errors="ignore")
+        if content is None:
+            return result
     except Exception:
         return result
 
@@ -124,25 +131,33 @@ def _scan_single_file(job: tuple) -> dict:
         # Determine which match function to use
         _match_fn = deconfuse_and_match if deconfuse_enabled else None
 
-        for name, pattern in all_secret_patterns.items():
-            try:
-                if _match_fn:
-                    matches = _match_fn(line, pattern)
-                    for m, _ in matches:
-                        val = m.group(0).strip()
-                        if val not in ignore_tokens:
-                            result["current_secrets"].append(
-                                {"type": name, "file": file_rel_path, "line": line_no, "match": val}
-                            )
-                else:
-                    for m in re.finditer(pattern, line):
-                        val = m.group(0).strip()
-                        if val not in ignore_tokens:
-                            result["current_secrets"].append(
-                                {"type": name, "file": file_rel_path, "line": line_no, "match": val}
-                            )
-            except re.error:
-                pass
+        # Combined regex fast path: one pass per line instead of len(patterns) passes
+        if combined_pattern and not _match_fn:
+            for name, val in combined_pattern_find(line, combined_pattern, name_map):
+                if val not in ignore_tokens:
+                    result["current_secrets"].append(
+                        {"type": name, "file": file_rel_path, "line": line_no, "match": val}
+                    )
+        else:
+            for name, pattern in all_secret_patterns.items():
+                try:
+                    if _match_fn:
+                        matches = _match_fn(line, pattern)
+                        for m, _ in matches:
+                            val = m.group(0).strip()
+                            if val not in ignore_tokens:
+                                result["current_secrets"].append(
+                                    {"type": name, "file": file_rel_path, "line": line_no, "match": val}
+                                )
+                    else:
+                        for m in re.finditer(pattern, line):
+                            val = m.group(0).strip()
+                            if val not in ignore_tokens:
+                                result["current_secrets"].append(
+                                    {"type": name, "file": file_rel_path, "line": line_no, "match": val}
+                                )
+                except re.error:
+                    pass
 
         for hit in scan_obfuscated_secrets(line, file_rel_path, all_secret_patterns):
             if hit["match"] not in ignore_tokens:
@@ -287,6 +302,9 @@ def scan_current_tree(
     taint_enabled: bool = False,
     stego_enabled: bool = False,
     perplexity_model=None,
+    mmap_enabled: bool = False,
+    combined_pattern=None,
+    name_map: dict | None = None,
 ) -> dict:
     """Scan the current working tree for secrets, PII, and injection attacks.
 
@@ -354,6 +372,9 @@ def scan_current_tree(
                     taint_enabled,
                     stego_enabled,
                     perplexity_model,
+                    mmap_enabled,
+                    combined_pattern,
+                    name_map or {},
                 )
             )
 

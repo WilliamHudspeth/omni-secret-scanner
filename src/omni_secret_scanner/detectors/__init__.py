@@ -11,6 +11,7 @@ from .ast_filter import ast_context_filter
 from .perplexity import CharMarkovModel, get_model_cache_path, collect_safe_corpus
 from .taint import taint_analysis
 from .stego import detect_lsb_steganography, is_stego_candidate
+from .parallel import scan_current_tree_parallel
 
 __all__ = [
     "scan_snippet",
@@ -34,4 +35,5 @@ __all__ = [
     "taint_analysis",
     "detect_lsb_steganography",
     "is_stego_candidate",
+    "scan_current_tree_parallel",
 ]

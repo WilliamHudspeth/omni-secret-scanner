@@ -88,6 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--perplexity", action="store_true", help="Train a Markov model on safe code to detect anomalous high-entropy strings")
     p.add_argument("--taint", action="store_true", help="Track secret-bearing variables to sensitive sinks (HTTP, subprocess, logging)")
     p.add_argument("--steganalysis", action="store_true", help="Detect LSB steganography in image files via RS steganalysis")
+    p.add_argument("--parallel", action="store_true", help="Use multiprocessing for CPU-bound file scanning")
+    p.add_argument("--mmap", action="store_true", help="Use memory-mapped I/O for large files (>1MB)")
+    p.add_argument("--mmap-threshold", type=int, default=1_000_000, metavar="BYTES", help="Minimum file size for mmap (default: 1000000)")
+    p.add_argument("--cache", action="store_true", help="Use disk cache to skip unchanged files on re-scan")
     p.add_argument("--validate", action="store_true", help="Validate found secrets against live APIs (GitHub, HuggingFace, npm, PyPI)")
     p.add_argument("--validate-timeout", type=int, default=5, metavar="SECONDS", help="API timeout for --validate (default: 5)")
     p.add_argument("--patterns", metavar="FILE", help="Load extra patterns from a YAML or JSON file")
@@ -409,6 +413,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     taint_enabled = getattr(args, "taint", False)
     stego_enabled = getattr(args, "steganalysis", False)
     perplexity_enabled = getattr(args, "perplexity", False)
+    parallel_enabled = getattr(args, "parallel", False)
+    mmap_enabled = getattr(args, "mmap", False)
+    cache_enabled = getattr(args, "cache", False)
 
     # ── Load .secretsignore ─────────────────────────────────────────────────
     ignore_files, ignore_tokens = load_secretsignore(repo_dir)
@@ -552,6 +559,21 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
 
     # ── Current tree scan ────────────────────────────────────────────────────
     max_file_size_kb = getattr(args, "max_file_size", 1024)
+
+    # Build combined regex for faster single-pass matching
+    from omni_secret_scanner.patterns.combined import build_combined_pattern, build_name_map
+    combined_pattern = build_combined_pattern(ALL_SECRET_PATTERNS) if not fast_mode else None
+    name_map = build_name_map(ALL_SECRET_PATTERNS) if combined_pattern else {}
+
+    # Initialize disk cache if enabled
+    scan_cache = None
+    if cache_enabled:
+        from omni_secret_scanner.utils.cache import ScanCache
+        scan_cache = ScanCache(repo_dir)
+        if not args.quiet:
+            stats = scan_cache.stats()
+            print(f"Cache: {stats['total']} entries ({stats['recent_24h']} from last 24h)", file=sys.stderr)
+
     tree_findings = scan_current_tree(
         repo_dir, exclude_patterns,
         None if fast_mode else nlp_deidentifier,
@@ -567,6 +589,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
         deconfuse_enabled=deconfuse_enabled,
         taint_enabled=taint_enabled,
         stego_enabled=stego_enabled,
+        mmap_enabled=mmap_enabled,
+        combined_pattern=combined_pattern,
+        name_map=name_map,
     )
 
     # ── Stash scan ───────────────────────────────────────────────────────────
