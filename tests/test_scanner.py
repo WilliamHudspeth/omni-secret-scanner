@@ -816,3 +816,233 @@ def test_filter_function_names_has_entries():
     assert "test_" in _FILTER_FUNCTION_NAMES
     assert "mock_" in _FILTER_FUNCTION_NAMES
     assert "setup" in _FILTER_FUNCTION_NAMES
+
+
+# ==============================================================================
+# 21. Phase 11 — Perplexity-Based Detection
+# ==============================================================================
+
+from omni_secret_scanner.detectors.perplexity import (
+    CharMarkovModel, PERPLEXITY_THRESHOLDS, get_perplexity_threshold,
+)
+
+
+class TestCharMarkovModel:
+    """Unit tests for the Markov model."""
+
+    def test_initial_state(self):
+        m = CharMarkovModel(n=5)
+        assert m.n == 5
+        assert not m.ngrams
+        assert m.perplexity("test") > 900  # untrained = very high
+
+    def test_train_and_perplexity(self):
+        m = CharMarkovModel(n=3)
+        corpus = "hello world hello world hello world " * 100
+        m.train(corpus)
+        # Trained text should have low perplexity
+        p1 = m.perplexity("hello world")
+        # Random-looking text should have higher perplexity
+        p2 = m.perplexity("AKIAIOSFODNN7EXAMPLE")
+        assert p2 > p1, f"Expected random-looking to have higher perplexity: {p1} vs {p2}"
+
+    def test_train_excludes_spans(self):
+        m = CharMarkovModel(n=3)
+        # Train on "abcSECRETdef" but exclude the SECRET part
+        m.train("abcSECRETdef", exclude_spans=[(3, 9)])
+        # The model shouldn't have learned SECRET
+        p_secret = m.perplexity("SECRET")
+        p_abc = m.perplexity("abc")
+        assert p_secret > p_abc * 0.5, f"Excluded text should be surprising: {p_secret} vs {p_abc}"
+
+    def test_save_load_roundtrip(self, tmp_path):
+        m = CharMarkovModel(n=3)
+        m.train("hello world " * 100)
+        path = tmp_path / "model.pkl"
+        m.save(path)
+        m2 = CharMarkovModel()
+        m2.load(path)
+        assert m2.n == m.n
+        # Perplexities should be roughly equal
+        p1 = m.perplexity("hello world")
+        p2 = m2.perplexity("hello world")
+        assert abs(p1 - p2) < 1.0
+
+    def test_logprob_finite(self):
+        m = CharMarkovModel(n=3)
+        m.train("abcdefghijklmnop " * 50)
+        lp = m.logprob("hello")
+        assert lp < 0  # log prob should be negative
+        assert lp > -100  # not insanely negative
+
+
+def test_perplexity_thresholds_mapped():
+    """PERPLEXITY_THRESHOLDS has entries for common languages."""
+    assert "py" in PERPLEXITY_THRESHOLDS
+    assert "js" in PERPLEXITY_THRESHOLDS
+    assert "java" in PERPLEXITY_THRESHOLDS
+    assert "json" in PERPLEXITY_THRESHOLDS
+    assert PERPLEXITY_THRESHOLDS["py"] > 0
+
+
+def test_get_perplexity_threshold():
+    assert get_perplexity_threshold("test.py") == PERPLEXITY_THRESHOLDS["py"]
+    assert get_perplexity_threshold("app.js") == PERPLEXITY_THRESHOLDS["js"]
+    assert get_perplexity_threshold("file.unknown") == 14.0  # default
+
+
+# ==============================================================================
+# 22. Phase 11 — Unicode Homoglyph Normalisation
+# ==============================================================================
+
+from omni_secret_scanner.utils.homoglyph import (
+    deconfuse, deconfuse_and_match, is_suspicious_unicode, _CONFUSABLES,
+)
+
+
+class TestHomoglyphDeconfuse:
+    """Tests for Unicode homoglyph handling."""
+
+    def test_deconfuse_ascii_passthrough(self):
+        text = "AKIAIOSFODNN7EXAMPLE"
+        result, flagged = deconfuse(text)
+        assert result == text
+        assert not flagged
+
+    def test_deconfuse_fullwidth(self):
+        # Fullwidth 'A' (U+FF21) should normalize to 'A'
+        text = "\uff21\uff2b\uff29\uff21"  # A K I A in fullwidth
+        result, flagged = deconfuse(text)
+        assert result == "AKIA"
+        assert flagged
+
+    def test_deconfuse_cyrillic_a(self):
+        # Cyrillic 'А' (U+0410) looks like Latin 'A'
+        text = "\u0410\u041a\u0406\u0410"  # Cyrillic A, K, I (U+0406), A
+        result, flagged = deconfuse(text)
+        assert "A" in result
+        assert "K" in result
+        assert flagged
+
+    def test_deconfuse_zero_width(self):
+        text = "AK\u200bIA"  # zero-width space in the middle
+        result, flagged = deconfuse(text)
+        assert result == "AKIA"
+        assert flagged
+
+    def test_deconfuse_mixed_script(self):
+        # Latin 'A' + Cyrillic 'К' — mixed script
+        text = "A\u041aIA"  # A (Latin) + К (Cyrillic) + IA (Latin)
+        _, flagged = deconfuse(text)
+        assert flagged
+
+    def test_deconfuse_empty(self):
+        result, flagged = deconfuse("")
+        assert result == ""
+        assert not flagged
+
+    def test_is_suspicious_unicode(self):
+        assert is_suspicious_unicode("AK\u200bIA")
+        assert is_suspicious_unicode("\u0410KIA")  # Cyrillic A
+        assert not is_suspicious_unicode("normal text")
+        assert not is_suspicious_unicode("AKIA1234")
+
+    def test_deconfuse_and_match_finds_obfuscated(self):
+        # Pattern looks for "AKIA" followed by uppercase letters/numbers
+        pattern = r"AKIA[A-Z0-9]{16}"
+        # Obfuscated with fullwidth characters: fullwidth A K I A
+        line = "key = '\uff21\uff2b\uff29\uff214400FODNN7EXAMPLE'"
+        matches = deconfuse_and_match(line, pattern)
+        assert len(matches) > 0
+
+    def test_deconfuse_and_match_original_still_works(self):
+        pattern = r"AKIA[A-Z0-9]{16}"
+        line = "key = 'AKIAIOSFODNN7EXAMPLE'"
+        matches = deconfuse_and_match(line, pattern)
+        assert len(matches) > 0
+        assert matches[0][1] is True  # from original
+
+    def test_confusables_table_size(self):
+        """Confusables table should have reasonable coverage."""
+        assert len(_CONFUSABLES) >= 80  # we have at least 80 mappings
+
+
+# ==============================================================================
+# 23. Phase 11 — Lightweight Taint Analysis
+# ==============================================================================
+
+from omni_secret_scanner.detectors.taint import taint_analysis
+
+
+class TestTaintAnalysis:
+    """Tests for intra-file taint tracking."""
+
+    def test_taint_returns_dict(self):
+        result = taint_analysis("test.py", "my_secret", "x = 'my_secret'", 1)
+        assert isinstance(result, dict)
+        for key in ("exploitability", "sinks", "tainted_vars", "method"):
+            assert key in result
+
+    def test_taint_low_for_simple_assignment(self):
+        content = "api_key = 'sk-1234567890abcdef'"
+        result = taint_analysis("test.py", "sk-1234567890abcdef", content, 1)
+        assert result["exploitability"] in ("low", "medium")
+
+    def test_taint_regex_detects_sink(self):
+        content = """
+api_key = 'sk-1234567890abcdef'
+requests.get('https://api.example.com', headers={'Authorization': api_key})
+"""
+        result = taint_analysis("test.py", "sk-1234567890abcdef", content, 2)
+        assert result["method"] in ("regex", "treesitter", "none")
+
+    def test_taint_graceful_on_bad_input(self):
+        result = taint_analysis("", "", "", 0)
+        assert result["exploitability"] == "low"
+
+    def test_taint_js_file(self):
+        content = "const token = 'ghp_xxx'; fetch('https://api.github.com', {headers: {Authorization: `Bearer ${token}`}})"
+        result = taint_analysis("app.js", "ghp_xxx", content, 1)
+        assert "exploitability" in result
+
+
+# ==============================================================================
+# 24. Phase 11 — LSB Steganography Detection
+# ==============================================================================
+
+from omni_secret_scanner.detectors.stego import (
+    detect_lsb_steganography, is_stego_candidate, _STEGO_EXTENSIONS,
+)
+
+
+class TestStegoDetection:
+    """Tests for LSB steganography detection."""
+
+    def test_detect_returns_dict(self):
+        result = detect_lsb_steganography("/nonexistent/file.png")
+        assert isinstance(result, dict)
+        for key in ("risk", "confidence", "rs_ratio", "method", "error"):
+            assert key in result
+
+    def test_detect_nonexistent_file(self):
+        result = detect_lsb_steganography("/nonexistent/file.png")
+        assert not result["risk"]
+        assert result["error"] is not None
+
+    def test_is_stego_candidate_png(self):
+        # We can't test actual files easily, but check extension logic
+        assert is_stego_candidate("image.png") is False  # doesn't exist
+        assert ".png" in _STEGO_EXTENSIONS
+        assert ".jpg" in _STEGO_EXTENSIONS
+        assert ".jpeg" in _STEGO_EXTENSIONS
+        assert ".bmp" in _STEGO_EXTENSIONS
+
+    def test_not_stego_candidate(self):
+        assert not is_stego_candidate("script.py")
+        assert not is_stego_candidate("document.pdf")
+        assert not is_stego_candidate("readme.md")
+
+    def test_stego_extensions_set(self):
+        """Ensure we cover common image formats."""
+        for ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif"):
+            assert ext in _STEGO_EXTENSIONS

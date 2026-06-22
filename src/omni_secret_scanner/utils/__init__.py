@@ -15,6 +15,7 @@ from .git import (
     get_context_snippet,
 )
 from .validation import SECRET_VALIDATORS, validate_secret
+from .homoglyph import deconfuse, deconfuse_and_match, is_suspicious_unicode
 
 __all__ = [
     "shannon_entropy",
@@ -34,4 +35,7 @@ __all__ = [
     "get_context_snippet",
     "SECRET_VALIDATORS",
     "validate_secret",
+    "deconfuse",
+    "deconfuse_and_match",
+    "is_suspicious_unicode",
 ]

@@ -84,6 +84,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--semgrep", action="store_true", help="Enable Semgrep AST static analysis scanning")
     p.add_argument("--lang-rules", action="store_true", help="Enable language-specific heuristic rule packs (Python, Node.js, Java)")
     p.add_argument("--ast-filter", action="store_true", help="Enable tree-sitter AST context filtering to reduce false positives")
+    p.add_argument("--deconfuse", action="store_true", help="Normalize Unicode homoglyphs to catch confusable-character attacks")
+    p.add_argument("--perplexity", action="store_true", help="Train a Markov model on safe code to detect anomalous high-entropy strings")
+    p.add_argument("--taint", action="store_true", help="Track secret-bearing variables to sensitive sinks (HTTP, subprocess, logging)")
+    p.add_argument("--steganalysis", action="store_true", help="Detect LSB steganography in image files via RS steganalysis")
     p.add_argument("--validate", action="store_true", help="Validate found secrets against live APIs (GitHub, HuggingFace, npm, PyPI)")
     p.add_argument("--validate-timeout", type=int, default=5, metavar="SECONDS", help="API timeout for --validate (default: 5)")
     p.add_argument("--patterns", metavar="FILE", help="Load extra patterns from a YAML or JSON file")
@@ -401,6 +405,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
 
     lang_rules_enabled = getattr(args, "lang_rules", False)
     ast_filter_enabled = getattr(args, "ast_filter", False)
+    deconfuse_enabled = getattr(args, "deconfuse", False)
+    taint_enabled = getattr(args, "taint", False)
+    stego_enabled = getattr(args, "steganalysis", False)
+    perplexity_enabled = getattr(args, "perplexity", False)
 
     # ── Load .secretsignore ─────────────────────────────────────────────────
     ignore_files, ignore_tokens = load_secretsignore(repo_dir)
@@ -556,6 +564,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
         max_file_size_kb=max_file_size_kb,
         lang_rules_enabled=lang_rules_enabled,
         ast_filter_enabled=ast_filter_enabled,
+        deconfuse_enabled=deconfuse_enabled,
+        taint_enabled=taint_enabled,
+        stego_enabled=stego_enabled,
     )
 
     # ── Stash scan ───────────────────────────────────────────────────────────

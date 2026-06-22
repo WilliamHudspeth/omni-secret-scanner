@@ -351,6 +351,40 @@ def generate_report(
             if v.get("details"):
                 w(f"    Detail: {v['details']}")
 
+    # ------------------------------------------------------------------
+    # Taint analysis findings (--taint)
+    # ------------------------------------------------------------------
+    taint_findings = tree_findings.get("taint", [])
+    if taint_findings:
+        sec("TAINT ANALYSIS — DATA FLOW TO SENSITIVE SINKS")
+        high = sum(1 for t in taint_findings if t.get("exploitability") == "high")
+        medium = sum(1 for t in taint_findings if t.get("exploitability") == "medium")
+        w(f"  Tainted secrets reaching sinks: {len(taint_findings)} | [HIGH]={high} | [MEDIUM]={medium}")
+        w()
+        for t in taint_findings:
+            m_val = redact_match(t.get("token", "")) if mask else t.get("token", "")
+            sinks_str = ", ".join(t.get("sinks", [])[:3])
+            w(f"  [{t.get('exploitability', 'low').upper()}] {t.get('file', '?')}:{t.get('line', '?')} "
+              f"-> {m_val}")
+            if sinks_str:
+                w(f"    Sinks: {sinks_str}")
+            if t.get("tainted_vars"):
+                w(f"    Variables: {', '.join(t['tainted_vars'][:5])}")
+            w(f"    Method: {t.get('method', 'none')}")
+
+    # ------------------------------------------------------------------
+    # Steganography findings (--steganalysis)
+    # ------------------------------------------------------------------
+    stego_findings = tree_findings.get("stego", [])
+    if stego_findings:
+        sec("LSB STEGANOGRAPHY DETECTION")
+        w(f"  Suspicious images: {len(stego_findings)}")
+        for s in stego_findings:
+            conf = s.get("confidence", 0)
+            conf_label = "HIGH" if conf >= 0.8 else ("MEDIUM" if conf >= 0.5 else "LOW")
+            w(f"  [{conf_label}] {s.get('file', '?')} "
+              f"(confidence: {conf:.2f}, RS ratio: {s.get('rs_ratio', 'N/A')})")
+
     gitignore_suggestions: list[str] = []
     files_to_check: set[str] = set(tree_findings["suspicious_files"])
     for s in tree_findings["current_secrets"]:

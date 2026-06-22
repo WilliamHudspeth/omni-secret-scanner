@@ -22,8 +22,11 @@ from ..utils.git import (
     get_submodules,
     match_exclude,
 )
+from ..utils.homoglyph import deconfuse, deconfuse_and_match
 from .snippet import scan_ipynb, scan_obfuscated_secrets, scan_pbix
 from .ast_filter import ast_context_filter
+from .stego import detect_lsb_steganography, is_stego_candidate
+from .taint import taint_analysis
 
 
 def _scan_single_file(job: tuple) -> dict:
@@ -40,6 +43,10 @@ def _scan_single_file(job: tuple) -> dict:
         presidio_analyzer,
         lang_rules_enabled,
         ast_filter_enabled,
+        deconfuse_enabled,
+        taint_enabled,
+        stego_enabled,
+        perplexity_model,
     ) = job
 
     lang_rules = get_lang_rules_for_file(file_rel_path, enabled=lang_rules_enabled)
@@ -51,6 +58,8 @@ def _scan_single_file(job: tuple) -> dict:
         "current_secrets": [],
         "nlp_pii": [],
         "injections": [],
+        "taint": [],
+        "stego": [],
     }
 
     from fnmatch import fnmatch
@@ -64,6 +73,20 @@ def _scan_single_file(job: tuple) -> dict:
             return result
     except Exception:
         return result
+
+    # ------------------------------------------------------------------
+    # Steganography check (image files only, when --steganalysis active)
+    # ------------------------------------------------------------------
+    if stego_enabled and is_stego_candidate(str(path)):
+        stego_result = detect_lsb_steganography(str(path))
+        if stego_result.get("risk"):
+            result["stego"].append({
+                "file": file_rel_path,
+                "type": "LSB_Steganography",
+                "confidence": stego_result.get("confidence", 0),
+                "rs_ratio": stego_result.get("rs_ratio", 0),
+                "method": stego_result.get("method", "RS"),
+            })
 
     if path.suffix == ".ipynb":
         for hit in scan_ipynb(path, all_secret_patterns):
@@ -98,14 +121,26 @@ def _scan_single_file(job: tuple) -> dict:
     for idx, line in enumerate(lines):
         line_no = idx + 1
 
+        # Determine which match function to use
+        _match_fn = deconfuse_and_match if deconfuse_enabled else None
+
         for name, pattern in all_secret_patterns.items():
             try:
-                for m in re.finditer(pattern, line):
-                    val = m.group(0).strip()
-                    if val not in ignore_tokens:
-                        result["current_secrets"].append(
-                            {"type": name, "file": file_rel_path, "line": line_no, "match": val}
-                        )
+                if _match_fn:
+                    matches = _match_fn(line, pattern)
+                    for m, _ in matches:
+                        val = m.group(0).strip()
+                        if val not in ignore_tokens:
+                            result["current_secrets"].append(
+                                {"type": name, "file": file_rel_path, "line": line_no, "match": val}
+                            )
+                else:
+                    for m in re.finditer(pattern, line):
+                        val = m.group(0).strip()
+                        if val not in ignore_tokens:
+                            result["current_secrets"].append(
+                                {"type": name, "file": file_rel_path, "line": line_no, "match": val}
+                            )
             except re.error:
                 pass
 
@@ -129,12 +164,21 @@ def _scan_single_file(job: tuple) -> dict:
                         )
 
         for name, pattern in CUSTOM_PII_PATTERNS.items():
-            for m in re.finditer(pattern, line):
-                val = m.group(0).strip()
-                if val not in ignore_tokens:
-                    result["current_secrets"].append(
-                        {"type": f"PII:{name}", "file": file_rel_path, "line": line_no, "match": val}
-                    )
+            if _match_fn:
+                matches = _match_fn(line, pattern)
+                for m, _ in matches:
+                    val = m.group(0).strip()
+                    if val not in ignore_tokens:
+                        result["current_secrets"].append(
+                            {"type": f"PII:{name}", "file": file_rel_path, "line": line_no, "match": val}
+                        )
+            else:
+                for m in re.finditer(pattern, line):
+                    val = m.group(0).strip()
+                    if val not in ignore_tokens:
+                        result["current_secrets"].append(
+                            {"type": f"PII:{name}", "file": file_rel_path, "line": line_no, "match": val}
+                        )
 
         for inj_name, inj_pattern in INJECTION_PATTERNS.items():
             try:
@@ -189,6 +233,31 @@ def _scan_single_file(job: tuple) -> dict:
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    # Taint analysis (Python/JS files only, when --taint active)
+    # ------------------------------------------------------------------
+    if taint_enabled and path.suffix in (".py", ".js", ".mjs", ".ts", ".tsx") and result["current_secrets"]:
+        for finding in result["current_secrets"]:
+            try:
+                taint = taint_analysis(
+                    str(path),
+                    finding.get("match", ""),
+                    content,
+                    finding.get("line", 0),
+                )
+                if taint.get("exploitability") in ("high", "medium"):
+                    result["taint"].append({
+                        "file": file_rel_path,
+                        "line": finding.get("line"),
+                        "token": finding.get("match", ""),
+                        "exploitability": taint["exploitability"],
+                        "sinks": taint.get("sinks", []),
+                        "tainted_vars": taint.get("tainted_vars", []),
+                        "method": taint.get("method", "none"),
+                    })
+            except Exception:
+                pass
+
     if ast_filter_enabled and result["current_secrets"]:
         filtered = [
             f for f in result["current_secrets"]
@@ -214,6 +283,10 @@ def scan_current_tree(
     progress: bool = True,
     lang_rules_enabled: bool = False,
     ast_filter_enabled: bool = False,
+    deconfuse_enabled: bool = False,
+    taint_enabled: bool = False,
+    stego_enabled: bool = False,
+    perplexity_model=None,
 ) -> dict:
     """Scan the current working tree for secrets, PII, and injection attacks.
 
@@ -230,6 +303,8 @@ def scan_current_tree(
         "current_secrets": [],
         "nlp_pii": [],
         "injections": [],
+        "taint": [],
+        "stego": [],
     }
     if not quiet:
         print("Scanning current working tree...", file=sys.stderr)
@@ -275,6 +350,10 @@ def scan_current_tree(
                     presidio_analyzer,
                     lang_rules_enabled,
                     ast_filter_enabled,
+                    deconfuse_enabled,
+                    taint_enabled,
+                    stego_enabled,
+                    perplexity_model,
                 )
             )
 
@@ -287,6 +366,8 @@ def scan_current_tree(
         findings["current_secrets"].extend(res["current_secrets"])
         findings["nlp_pii"].extend(res["nlp_pii"])
         findings["injections"].extend(res["injections"])
+        findings["taint"].extend(res.get("taint", []))
+        findings["stego"].extend(res.get("stego", []))
 
     if workers == 1 or len(file_jobs) <= 1:
         _iter = file_jobs
@@ -318,7 +399,7 @@ def scan_current_tree(
                 try:
                     res = future.result()
                 except Exception:
-                    res = {"suspicious_files": [], "current_secrets": [], "nlp_pii": [], "injections": []}
+                    res = {"suspicious_files": [], "current_secrets": [], "nlp_pii": [], "injections": [], "taint": [], "stego": []}
                 _merge(res)
                 if _progress:
                     _progress.update(1)
@@ -347,6 +428,10 @@ def scan_current_tree(
                     progress=progress,
                     lang_rules_enabled=lang_rules_enabled,
                     ast_filter_enabled=ast_filter_enabled,
+                    deconfuse_enabled=deconfuse_enabled,
+                    taint_enabled=taint_enabled,
+                    stego_enabled=stego_enabled,
+                    perplexity_model=perplexity_model,
                 )
                 for s in sub_findings["current_secrets"]:
                     s["file"] = f"{sub}/{s['file']}"

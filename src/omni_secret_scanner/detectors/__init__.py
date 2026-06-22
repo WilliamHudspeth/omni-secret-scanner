@@ -8,6 +8,9 @@ from .powershell import run_ps_crosscheck
 from .semgrep import run_semgrep_scan
 from .nlp import init_nlp_deidentifier, init_presidio_analyzer
 from .ast_filter import ast_context_filter
+from .perplexity import CharMarkovModel, get_model_cache_path, collect_safe_corpus
+from .taint import taint_analysis
+from .stego import detect_lsb_steganography, is_stego_candidate
 
 __all__ = [
     "scan_snippet",
@@ -25,4 +28,10 @@ __all__ = [
     "init_nlp_deidentifier",
     "init_presidio_analyzer",
     "ast_context_filter",
+    "CharMarkovModel",
+    "get_model_cache_path",
+    "collect_safe_corpus",
+    "taint_analysis",
+    "detect_lsb_steganography",
+    "is_stego_candidate",
 ]
