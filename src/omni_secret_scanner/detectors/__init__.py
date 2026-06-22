@@ -12,6 +12,8 @@ from .perplexity import CharMarkovModel, get_model_cache_path, collect_safe_corp
 from .taint import taint_analysis
 from .stego import detect_lsb_steganography, is_stego_candidate
 from .parallel import scan_current_tree_parallel
+from .watchdog import run_watch_mode
+from .external import run_gitleaks, run_trivy
 
 __all__ = [
     "scan_snippet",
@@ -36,4 +38,7 @@ __all__ = [
     "detect_lsb_steganography",
     "is_stego_candidate",
     "scan_current_tree_parallel",
+    "run_watch_mode",
+    "run_gitleaks",
+    "run_trivy",
 ]

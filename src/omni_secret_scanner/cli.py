@@ -92,6 +92,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mmap", action="store_true", help="Use memory-mapped I/O for large files (>1MB)")
     p.add_argument("--mmap-threshold", type=int, default=1_000_000, metavar="BYTES", help="Minimum file size for mmap (default: 1000000)")
     p.add_argument("--cache", action="store_true", help="Use disk cache to skip unchanged files on re-scan")
+    p.add_argument("--watch", action="store_true", help="Watch repo for file changes and re-scan modified files (requires watchdog)")
+    p.add_argument("--gitleaks", action="store_true", help="Run Gitleaks external scan and merge findings")
+    p.add_argument("--trivy", action="store_true", help="Run Trivy external scan and merge findings")
+    p.add_argument("--decay", action="store_true", help="Apply decay-weighted scoring to history findings by commit age")
+    p.add_argument("--audit-report", metavar="FILE", help="Generate a tamper-evident JSON audit report")
+    p.add_argument("--fix", action="store_true", help="Auto-redact all found secrets in-place and stage changed files")
     p.add_argument("--validate", action="store_true", help="Validate found secrets against live APIs (GitHub, HuggingFace, npm, PyPI)")
     p.add_argument("--validate-timeout", type=int, default=5, metavar="SECONDS", help="API timeout for --validate (default: 5)")
     p.add_argument("--patterns", metavar="FILE", help="Load extra patterns from a YAML or JSON file")
@@ -399,6 +405,25 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
         os.chdir(args.repo_dir)
     repo_dir = os.getcwd()
 
+    # ── --watch: continuous monitoring mode ──────────────────────────────────
+    if args.watch:
+        from omni_secret_scanner.detectors.watchdog import run_watch_mode
+        from omni_secret_scanner.detectors.file_tree import _scan_single_file
+
+        def _scan_watch_file(filepath: str) -> dict:
+            """Adapter: scan a single file for watchdog mode."""
+            from pathlib import Path as _Path
+            from omni_secret_scanner.patterns import ALL_SECRET_PATTERNS
+            p = _Path(filepath)
+            job = (p, str(p), 1024 * 1024 * 10, ALL_SECRET_PATTERNS,
+                   [], [], False, None, None, False, False, False, False,
+                   False, None, False, None, {})
+            return _scan_single_file(job)
+
+        run_watch_mode(repo_dir, _scan_watch_file,
+                       _DEFAULT_EXCLUDE_PATTERNS, quiet=args.quiet)
+        return 0
+
     # ── Load .omni-scan.toml (CLI flags take precedence) ────────────────────
     toml_config = load_toml_config(path=getattr(args, "config", None), repo_dir=repo_dir)
     if toml_config and not args.quiet:
@@ -638,6 +663,24 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     )
 
     # ── Report ───────────────────────────────────────────────────────────────
+    # Apply decay-weighted scoring if --decay is active
+    if getattr(args, "decay", False):
+        from omni_secret_scanner.utils.decay import apply_decay_to_findings
+        apply_decay_to_findings(history_findings.get("secrets", []))
+        apply_decay_to_findings(history_findings.get("pii", []))
+        apply_decay_to_findings(history_findings.get("injections", []))
+
+    # Merge external tool findings if requested
+    ext_findings: list[dict] = []
+    if getattr(args, "gitleaks", False):
+        from omni_secret_scanner.detectors.external import run_gitleaks
+        ext_findings.extend(run_gitleaks(repo_dir, quiet=args.quiet))
+    if getattr(args, "trivy", False):
+        from omni_secret_scanner.detectors.external import run_trivy
+        ext_findings.extend(run_trivy(repo_dir, quiet=args.quiet))
+    if ext_findings:
+        tree_findings.setdefault("current_secrets", []).extend(ext_findings)
+
     total_issues = generate_report(
         history_findings, tree_findings, ps_findings,
         args.output, args.format, mask=args.mask,
@@ -674,6 +717,42 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     # ── Generate filter-repo replacements ────────────────────────────────────
     if args.generate_filter_repo:
         _write_filter_repo(history_findings, tree_findings, ps_findings, semgrep_findings)
+
+    # ── --fix: auto-redact all found secrets ─────────────────────────────────
+    if getattr(args, "fix", False):
+        from omni_secret_scanner.utils.fix import (
+            redact_findings_in_files, stage_and_suggest_commit,
+        )
+        all_secrets = (
+            history_findings.get("secrets", [])
+            + tree_findings.get("current_secrets", [])
+            + tree_findings.get("nlp_pii", [])
+        )
+        modified = redact_findings_in_files(
+            all_secrets, repo_dir,
+            dry_run=args.dryrun, quiet=args.quiet,
+        )
+        if modified and not args.dryrun:
+            stage_and_suggest_commit(modified, repo_dir, quiet=args.quiet)
+
+    # ── --audit-report: tamper-evident JSON report ───────────────────────────
+    if getattr(args, "audit_report", None):
+        from omni_secret_scanner.reporters.audit import generate_audit_report
+        summary = {
+            "files_scanned": len(tree_findings.get("current_secrets", [])),
+            "history_secrets": history_findings.get("secrets", []),
+            "current_secrets": tree_findings.get("current_secrets", []),
+            "nlp_pii": tree_findings.get("nlp_pii", []),
+            "injections": injection_findings,
+            "taint": tree_findings.get("taint", []),
+            "stego": tree_findings.get("stego", []),
+            "semgrep": semgrep_findings,
+            "validated": validated_secrets,
+        }
+        audit_hash = generate_audit_report(repo_dir, summary, args.audit_report)
+        if not args.quiet:
+            print(f"Audit report written to {args.audit_report} (SHA-256: {audit_hash})",
+                  file=sys.stderr)
 
     return 1 if total_issues > 0 else 0
 

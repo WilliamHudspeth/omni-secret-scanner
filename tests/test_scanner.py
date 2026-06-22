@@ -1175,3 +1175,151 @@ class TestScanCache:
         cache.clear()
         assert cache.stats()["total"] == 0
         cache.close()
+
+
+# ==============================================================================
+# 28. Phase 13 — Decay-Weighted History Scoring
+# ==============================================================================
+
+from omni_secret_scanner.utils.decay import (
+    decay_weight, apply_decay_to_findings, parse_commit_date,
+)
+
+
+class TestDecayWeight:
+    """Tests for commit-age decay weighting."""
+
+    def test_decay_weight_recent(self):
+        """Recent commits should have weight near 1.0."""
+        w = decay_weight("2026-06-22T00:00:00Z")
+        assert 0.9 <= w <= 1.0
+
+    def test_decay_weight_old(self):
+        """Old commits should have lower weight."""
+        w = decay_weight("2020-06-22T00:00:00Z")
+        assert w < 0.5
+
+    def test_decay_weight_unparseable(self):
+        """Unparseable dates default to 1.0."""
+        assert decay_weight("not-a-date") == 1.0
+
+    def test_apply_decay_to_findings(self):
+        findings = [
+            {"type": "AWS Key", "match": "xxx", "commit_date": "2026-06-22T00:00:00Z"},
+            {"type": "GitHub Token", "match": "yyy", "commit_date": "2020-01-01T00:00:00Z"},
+            {"type": "API Key", "match": "zzz"},  # no date
+        ]
+        apply_decay_to_findings(findings)
+        assert "decay_weight" in findings[0]
+        assert findings[0]["decay_weight"] > findings[1]["decay_weight"]
+        assert findings[2]["decay_weight"] == 1.0  # no date = assume recent
+
+    def test_parse_commit_date(self):
+        ts = parse_commit_date("2026-06-22T14:30:00+00:00")
+        assert ts is not None
+        assert parse_commit_date("garbage") is None
+
+
+# ==============================================================================
+# 29. Phase 13 — Audit Report
+# ==============================================================================
+
+from omni_secret_scanner.reporters.audit import (
+    generate_audit_report, verify_audit_report,
+)
+
+
+class TestAuditReport:
+    """Tests for tamper-evident audit reports."""
+
+    def test_generate_audit_report(self, tmp_path):
+        out = tmp_path / "audit.json"
+        summary = {"secrets_count": 5, "pii_count": 2, "injection_count": 1}
+        h = generate_audit_report(str(tmp_path), summary, str(out))
+        assert out.exists()
+        assert len(h) == 64  # SHA-256 hex
+
+    def test_verify_valid_report(self, tmp_path):
+        out = tmp_path / "audit.json"
+        generate_audit_report(str(tmp_path), {"secrets_count": 1}, str(out))
+        result = verify_audit_report(str(out))
+        assert result["valid"] is True
+
+    def test_verify_tampered_report(self, tmp_path):
+        out = tmp_path / "audit.json"
+        generate_audit_report(str(tmp_path), {"secrets_count": 1}, str(out))
+        # Tamper with the file
+        raw = out.read_text()
+        raw = raw.replace('"secrets_count": 1', '"secrets_count": 99')
+        out.write_text(raw)
+        result = verify_audit_report(str(out))
+        assert result["valid"] is False
+
+    def test_verify_nonexistent(self):
+        result = verify_audit_report("/nonexistent/audit.json")
+        assert result["valid"] is False
+
+
+# ==============================================================================
+# 30. Phase 13 — External Tools (Gitleaks/Trivy)
+# ==============================================================================
+
+from omni_secret_scanner.detectors.external import run_gitleaks, run_trivy
+
+
+class TestExternalTools:
+    """Tests for external tool integration (graceful degradation)."""
+
+    def test_gitleaks_not_installed(self):
+        # Should return empty list gracefully when gitleaks not on PATH
+        findings = run_gitleaks(".", quiet=True)
+        assert isinstance(findings, list)
+
+    def test_trivy_not_installed(self):
+        findings = run_trivy(".", quiet=True)
+        assert isinstance(findings, list)
+
+
+# ==============================================================================
+# 31. Phase 13 — Auto-Fix Mode
+# ==============================================================================
+
+from omni_secret_scanner.utils.fix import (
+    redact_findings_in_files, stage_and_suggest_commit,
+)
+
+
+class TestAutoFix:
+    """Tests for --fix auto-redaction mode."""
+
+    def test_redact_dry_run(self, tmp_path):
+        f = tmp_path / "secret.py"
+        f.write_text("key = 'AKIAIO...MPLE'", encoding="utf-8")
+        findings = [{"file": "secret.py", "match": "AKIAIO...MPLE", "line": 1}]
+        import os
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            modified = redact_findings_in_files(findings, ".", dry_run=True, quiet=True)
+            assert "secret.py" in modified
+            # File should NOT be modified in dry run
+            assert "AKIAIO" in f.read_text()
+        finally:
+            os.chdir(old_cwd)
+
+    def test_stage_and_suggest(self):
+        cmd = stage_and_suggest_commit(["file1.py", "file2.py"], ".", quiet=True)
+        assert "git commit" in cmd
+        assert "file1.py" in cmd or "2 files" in cmd
+
+
+# ==============================================================================
+# 32. Phase 13 — Watchdog (import check only)
+# ==============================================================================
+
+from omni_secret_scanner.detectors.watchdog import run_watch_mode
+
+
+def test_watchdog_importable():
+    """run_watch_mode should be importable (actual run requires watchdog)."""
+    assert callable(run_watch_mode)

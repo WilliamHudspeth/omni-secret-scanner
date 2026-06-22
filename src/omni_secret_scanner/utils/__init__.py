@@ -18,6 +18,8 @@ from .validation import SECRET_VALIDATORS, validate_secret
 from .homoglyph import deconfuse, deconfuse_and_match, is_suspicious_unicode
 from .mmap_io import read_file_content, get_mmap_threshold
 from .cache import ScanCache
+from .decay import decay_weight, apply_decay_to_findings
+from .fix import redact_findings_in_files, stage_and_suggest_commit
 
 __all__ = [
     "shannon_entropy",
@@ -40,4 +42,8 @@ __all__ = [
     "deconfuse",
     "deconfuse_and_match",
     "is_suspicious_unicode",
+    "decay_weight",
+    "apply_decay_to_findings",
+    "redact_findings_in_files",
+    "stage_and_suggest_commit",
 ]
