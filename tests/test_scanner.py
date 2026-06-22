@@ -431,10 +431,10 @@ def test_run_semgrep_scan(monkeypatch):
         stderr = ""
 
     monkeypatch.setattr(
-        "omni_secret_scanner.detectors.semgrep.shutil.which", lambda cmd: "/usr/bin/semgrep"
+        "rgt_codebase_scanner.detectors.semgrep.shutil.which", lambda cmd: "/usr/bin/semgrep"
     )
     monkeypatch.setattr(
-        "omni_secret_scanner.detectors.semgrep.subprocess.run", lambda *a, **kw: _MockProc()
+        "rgt_codebase_scanner.detectors.semgrep.subprocess.run", lambda *a, **kw: _MockProc()
     )
 
     findings = run_semgrep_scan("/fake/dir")
@@ -1426,18 +1426,18 @@ def test_watchdog_importable():
 # 33. Phase 14 — LLM Triage Pipeline
 # ==============================================================================
 
-from omni_secret_scanner.llm.middleware import (
+from rgt_codebase_scanner.llm.middleware import (
     extract_all_findings, group_by_file, prune_findings,
     classify_risk, build_stats,
 )
-from omni_secret_scanner.llm.orchestrator import (
+from rgt_codebase_scanner.llm.orchestrator import (
     TriageOrchestrator, _deterministic_triage, create_provider,
 )
-from omni_secret_scanner.llm.prompts import (
+from rgt_codebase_scanner.llm.prompts import (
     build_file_prompt, build_summary_prompt, TRIAGE_SYSTEM_PROMPT,
     EXPLOITABILITY_SYSTEM_PROMPT,
 )
-from omni_secret_scanner.llm.tools import (
+from rgt_codebase_scanner.llm.tools import (
     get_tool_schema, execute_tool_call,
 )
 

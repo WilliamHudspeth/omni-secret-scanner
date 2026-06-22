@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 """
-minimal_api.py — FastAPI microservice wrapper for omni-secret-scanner.
+minimal_api.py — FastAPI microservice wrapper for RGT Codebase Scanner.
 
 Exposes scan_snippet as an HTTP endpoint.  Not part of the core package;
 this is a standalone file you can run directly.
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Optional
 
 try:
     from fastapi import FastAPI
@@ -34,13 +33,13 @@ except ImportError:
     )
     sys.exit(1)
 
-from omni_secret_scanner import __version__
-from omni_secret_scanner.detectors import scan_snippet
-from omni_secret_scanner.reporters.base import injection_risk_score
+from rgt_codebase_scanner import __version__
+from rgt_codebase_scanner.detectors import scan_snippet
+from rgt_codebase_scanner.reporters.base import injection_risk_score
 
 
 app = FastAPI(
-    title="omni-secret-scanner API",
+    title="RGT Codebase Scanner API",
     version=__version__,
     description="Production-grade secret, PII & injection scanner — HTTP API",
 )
@@ -86,7 +85,7 @@ def health() -> dict:
 @app.get("/schema")
 def schema() -> dict:
     """Return the OpenAI function-calling tool schema."""
-    from omni_secret_scanner.cli import print_tool_schema
+    from rgt_codebase_scanner.cli import print_tool_schema
     import io
     buf = io.StringIO()
     old_stdout = sys.stdout
@@ -104,7 +103,7 @@ def schema() -> dict:
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"omni-secret-scanner API v{__version__}", file=sys.stderr)
+    print(f"RGT Codebase Scanner API v{__version__}", file=sys.stderr)
     print("Endpoints:", file=sys.stderr)
     print("  POST /scan   — scan a text snippet", file=sys.stderr)
     print("  GET  /health — health check", file=sys.stderr)
