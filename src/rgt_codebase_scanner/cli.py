@@ -72,6 +72,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repo-dir", help="Path to git repository (default: current directory)")
     p.add_argument("--stdin", action="store_true", help="Scan content from standard input")
     p.add_argument("--text", help="Scan a text snippet passed as this argument")
+    p.add_argument(
+        "--target-type",
+        choices=["repo", "path", "url", "docker", "env", "clipboard"],
+        default="repo",
+        metavar="TYPE",
+        help="What to scan: repo (default), path, url, docker, env, clipboard",
+    )
+    p.add_argument(
+        "--target",
+        metavar="TARGET",
+        help="Target for --target-type (path/URL/image name; omit for env/clipboard)",
+    )
 
     # Output
     p.add_argument("--output", "-o", help="Save report to file (default: stdout)")
@@ -772,6 +784,60 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
         )
         return 1 if total_issues > 0 else 0
 
+    # ── Non-repo target types (path / url / docker / env / clipboard) ────────
+    target_type = getattr(args, "target_type", "repo")
+    if target_type != "repo":
+        from .targets.resolver import resolve_target
+
+        target_label = getattr(args, "target", None)
+        all_secrets: list[dict] = []
+        for label, content_bytes in resolve_target(target_type, target_label, quiet=args.quiet):
+            try:
+                text = content_bytes.decode("utf-8", errors="replace")
+            except Exception:
+                continue
+            findings = scan_snippet(
+                text,
+                label,
+                entropy_threshold=args.entropy_threshold,
+                ignore_tokens=ignore_tokens,
+                extract_code_blocks=False,
+                sensitive_words=sensitive_words,
+                presidio_analyzer=presidio_analyzer,
+            )
+            for item in (
+                findings.get("secrets", []) + findings.get("pii", []) + findings.get("entropy", [])
+            ):
+                item.setdefault("file", label)
+                all_secrets.append(item)
+
+        history_findings = {
+            "secrets": all_secrets,
+            "pii": [],
+            "entropy": [],
+            "commits": [],
+            "injections": [],
+        }
+        tree_findings = {
+            "suspicious_files": [],
+            "current_secrets": [],
+            "nlp_pii": [],
+            "injections": [],
+        }
+        total_issues = generate_report(
+            history_findings,
+            tree_findings,
+            [],
+            args.output,
+            args.format,
+            mask=args.mask,
+            context_lines=args.context_lines,
+            show_score=args.confidence_score,
+            injection_findings=[],
+            sanitize=args.sanitize,
+        )
+        return 1 if total_issues > 0 else 0
+
     # ── PowerShell cross-check ───────────────────────────────────────────────
     ps_findings: list[dict] = []
     if args.ps_crosscheck:
@@ -1039,7 +1105,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
         from rgt_codebase_scanner.reporters.audit import generate_audit_report
 
         summary = {
-            "files_scanned": len(tree_findings.get("current_secrets", [])),
+            "files_scanned": len(
+                {s.get("file", "") for s in tree_findings.get("current_secrets", [])}
+                | {s.get("file", "") for s in tree_findings.get("nlp_pii", [])}
+                | set(tree_findings.get("suspicious_files", []))
+            ),
             "history_secrets": history_findings.get("secrets", []),
             "current_secrets": tree_findings.get("current_secrets", []),
             "nlp_pii": tree_findings.get("nlp_pii", []),

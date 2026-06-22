@@ -20,8 +20,12 @@ def load_toml_config(path: str | None = None, repo_dir: str | None = None) -> di
         toml_path = Path(path)
     elif repo_dir:
         toml_path = Path(repo_dir) / ".rgt-scan.toml"
+        if not toml_path.exists():
+            toml_path = Path(repo_dir) / ".omni-scan.toml"
     else:
         toml_path = Path(".rgt-scan.toml")
+        if not toml_path.exists():
+            toml_path = Path(".omni-scan.toml")
 
     if not toml_path.exists():
         return config
@@ -97,7 +101,7 @@ def load_external_patterns(path: str, quiet: bool = False) -> tuple[dict, dict]:
         return extra_secrets, extra_pii
     try:
         if p.suffix in (".yaml", ".yml"):
-            import yaml
+            import yaml  # type: ignore[import-untyped]
 
             data = yaml.safe_load(p.read_text(encoding="utf-8"))
         else:

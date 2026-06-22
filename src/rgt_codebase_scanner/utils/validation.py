@@ -46,6 +46,10 @@ def validate_secret(secret_type: str, value: str, timeout: int = 5) -> dict:
 
     if predicate == "403_vs_401":
         try:
+            import base64 as _base64
+
+            auth_str = _base64.b64encode(f"__token__:{value}".encode()).decode("utf-8")
+            headers["Authorization"] = f"Basic {auth_str}"
             req = urllib.request.Request(endpoint, method=method or "POST", headers=headers)
             resp = urllib.request.urlopen(req, timeout=timeout)
             result["status_code"] = resp.getcode()
