@@ -25,6 +25,7 @@ from ..utils.git import (
 )
 from ..utils.homoglyph import deconfuse_and_match
 from ..utils.mmap_io import read_file_content
+from ..utils.entropy import is_hex_hash
 from .ast_filter import ast_context_filter
 from .snippet import scan_ipynb, scan_obfuscated_secrets, scan_pbix
 from .stego import detect_lsb_steganography, is_stego_candidate
@@ -119,6 +120,10 @@ def _run_pattern_scan(
             except re.error:
                 pass
 
+    # Filter out hex hashes (MD5, SHA1, SHA256) that look like tokens
+    current_secrets = [
+        s for s in current_secrets if not is_hex_hash(s.get("match", ""))
+    ]
     return current_secrets, injections
 
 

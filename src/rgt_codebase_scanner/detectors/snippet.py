@@ -12,6 +12,7 @@ from ..patterns import (
     CUSTOM_PII_PATTERNS,
     INJECTION_PATTERNS,
 )
+from ..utils.entropy import is_hex_hash
 from ..utils.entropy import is_ignored_entropy_token, shannon_entropy
 from ..utils.git import extract_markdown_code_blocks, get_line_number_from_offset
 
@@ -170,6 +171,10 @@ def scan_snippet(
         except Exception:
             pass
 
+    # Filter hex hashes that look like tokens
+    findings["secrets"] = [
+        s for s in findings["secrets"] if not is_hex_hash(s.get("match", ""))
+    ]
     return findings
 
 
