@@ -31,6 +31,12 @@ _SELF_TEST_CASES = [
 # Default file exclusions (supplemented by .secretsignore)
 _DEFAULT_EXCLUDE_PATTERNS = [
     "*.lock",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "Cargo.lock",
+    "Gemfile.lock",
     "*.svg",
     "*.png",
     "*.jpg",
@@ -42,14 +48,15 @@ _DEFAULT_EXCLUDE_PATTERNS = [
     "*.eot",
     "*.min.js",
     "*.min.css",
-    "package-lock.json",
     "*.sum",
     ".gitignore",
     ".gitattributes",
     ".git/",
     "node_modules/",
     "vendor/",
-    "dist/",
+    "*.pbxproj",
+    "*.storyboard",
+    "*.xib",
     "build/",
     "__pycache__/",
     "*.pyc",
@@ -1001,7 +1008,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
 
         target_label = getattr(args, "target", None)
         all_secrets: list[dict] = []
-        for label, content_bytes in resolve_target(target_type, target_label, quiet=args.quiet):
+        for label, content_bytes in resolve_target(
+            target_type, target_label, quiet=args.quiet, exclude_patterns=exclude_patterns,
+        ):
             try:
                 text = content_bytes.decode("utf-8", errors="replace")
             except Exception:

@@ -18,6 +18,7 @@ def resolve_target(
     target_type: str,
     target: str | None,
     quiet: bool = False,
+    exclude_patterns: list[str] | None = None,
 ) -> Iterator[tuple[str, bytes]]:
     """Yield ``(label, content)`` pairs for the given target type.
 
@@ -25,11 +26,10 @@ def resolve_target(
     ``content`` is the raw bytes of the content to scan.
     """
     if target_type == "repo":
-        # Handled by the existing git-history / file-tree scanners; nothing to yield here.
         return
 
     if target_type == "path":
-        yield from _resolve_path(target or ".", quiet)
+        yield from _resolve_path(target or ".", quiet, exclude_patterns or [])
 
     elif target_type == "url":
         if not target:
@@ -58,7 +58,9 @@ def resolve_target(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_path(root: str, quiet: bool) -> Iterator[tuple[str, bytes]]:
+def _resolve_path(root: str, quiet: bool, exclude_patterns: list[str]) -> Iterator[tuple[str, bytes]]:
+    from ..utils.git import match_exclude
+
     p = Path(root)
     if not p.exists():
         print(f"Error: Path not found: {root}", file=sys.stderr)
@@ -71,12 +73,16 @@ def _resolve_path(root: str, quiet: bool) -> Iterator[tuple[str, bytes]]:
                 print(f"Warning: Could not read {p}: {e}", file=sys.stderr)
         return
     for child in sorted(p.rglob("*")):
-        if child.is_file():
-            try:
-                yield (str(child), child.read_bytes())
-            except OSError as e:
-                if not quiet:
-                    print(f"Warning: Could not read {child}: {e}", file=sys.stderr)
+        if not child.is_file():
+            continue
+        rel = str(child.relative_to(p)).replace("\\", "/")
+        if match_exclude(rel, exclude_patterns):
+            continue
+        try:
+            yield (str(child), child.read_bytes())
+        except OSError as e:
+            if not quiet:
+                print(f"Warning: Could not read {child}: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
