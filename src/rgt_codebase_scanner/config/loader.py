@@ -97,7 +97,7 @@ def load_external_patterns(path: str, quiet: bool = False) -> tuple[dict, dict]:
         return extra_secrets, extra_pii
     try:
         if p.suffix in (".yaml", ".yml"):
-            import yaml  # type: ignore[import-untyped]
+            import yaml
 
             data = yaml.safe_load(p.read_text(encoding="utf-8"))
         else:
