@@ -12,7 +12,6 @@ from pathlib import Path
 
 from . import __version__
 
-
 # ---------------------------------------------------------------------------
 # Built-in self-test cases
 # ---------------------------------------------------------------------------
@@ -31,16 +30,36 @@ _SELF_TEST_CASES = [
 
 # Default file exclusions (supplemented by .secretsignore)
 _DEFAULT_EXCLUDE_PATTERNS = [
-    "*.lock", "*.svg", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.ico", "*.woff*",
-    "*.ttf", "*.eot", "*.min.js", "*.min.css", "package-lock.json", "*.sum",
-    ".gitignore", ".gitattributes", ".git/", "node_modules/", "vendor/", "dist/",
-    "build/", "__pycache__/", "*.pyc",
+    "*.lock",
+    "*.svg",
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.ico",
+    "*.woff*",
+    "*.ttf",
+    "*.eot",
+    "*.min.js",
+    "*.min.css",
+    "package-lock.json",
+    "*.sum",
+    ".gitignore",
+    ".gitattributes",
+    ".git/",
+    "node_modules/",
+    "vendor/",
+    "dist/",
+    "build/",
+    "__pycache__/",
+    "*.pyc",
 ]
 
 
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -56,69 +75,230 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Output
     p.add_argument("--output", "-o", help="Save report to file (default: stdout)")
-    p.add_argument("--format", choices=["text", "json", "sarif", "html"], default="text", help="Output format (default: text)")
+    p.add_argument(
+        "--format",
+        choices=["text", "json", "sarif", "html"],
+        default="text",
+        help="Output format (default: text)",
+    )
     p.add_argument("--quiet", "-q", action="store_true", help="Suppress stderr status messages")
     p.add_argument("--mask", action="store_true", help="Redact matched secrets in report output")
-    p.add_argument("--sanitize", action="store_true", help="Neutralise injection strings in output (safe for LLM consumption)")
-    p.add_argument("--context-lines", type=int, default=0, metavar="N", help="Show N lines of context around each finding (default: 0)")
-    p.add_argument("--confidence-score", action="store_true", help="Print a 0–100 Safety Score in the text report")
+    p.add_argument(
+        "--sanitize",
+        action="store_true",
+        help="Neutralise injection strings in output (safe for LLM consumption)",
+    )
+    p.add_argument(
+        "--context-lines",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Show N lines of context around each finding (default: 0)",
+    )
+    p.add_argument(
+        "--confidence-score",
+        action="store_true",
+        help="Print a 0–100 Safety Score in the text report",
+    )
 
     # Scan scope
-    p.add_argument("--all-branches", action="store_true", help="Scan all git branches, not just HEAD")
-    p.add_argument("--since", help="Incremental scan: start from this commit/date (e.g. HEAD~3, 2026-06-01)")
-    p.add_argument("--diff", metavar="BASE", help="Scan only lines added since BASE ref (e.g. main, HEAD~3)")
+    p.add_argument(
+        "--all-branches", action="store_true", help="Scan all git branches, not just HEAD"
+    )
+    p.add_argument(
+        "--since", help="Incremental scan: start from this commit/date (e.g. HEAD~3, 2026-06-01)"
+    )
+    p.add_argument(
+        "--diff", metavar="BASE", help="Scan only lines added since BASE ref (e.g. main, HEAD~3)"
+    )
     p.add_argument("--reflog", action="store_true", help="Scan git reflog for force-pushed commits")
     p.add_argument("--scan-stash", action="store_true", help="Scan all git stash entries")
     p.add_argument("--submodules", action="store_true", help="Recursively scan git submodules")
-    p.add_argument("--fast", action="store_true", help="Fast mode: skip history, NLP, and Semgrep (optimised for pre-commit)")
-    p.add_argument("--max-file-size", type=int, default=1024, metavar="KB", help="Skip files larger than this size in KB (default: 1024)")
+    p.add_argument(
+        "--fast",
+        action="store_true",
+        help="Fast mode: skip history, NLP, and Semgrep (optimised for pre-commit)",
+    )
+    p.add_argument(
+        "--max-file-size",
+        type=int,
+        default=1024,
+        metavar="KB",
+        help="Skip files larger than this size in KB (default: 1024)",
+    )
 
     # Detection
-    p.add_argument("--entropy-threshold", type=float, default=3.8, help="Shannon entropy threshold (default: 3.8)")
+    p.add_argument(
+        "--entropy-threshold",
+        type=float,
+        default=3.8,
+        help="Shannon entropy threshold (default: 3.8)",
+    )
     p.add_argument("--sensitive-words", help="Comma-separated list of custom sensitive words")
-    p.add_argument("--extract-code-blocks", action="store_true", help="Scan only fenced code blocks in Markdown files")
+    p.add_argument(
+        "--extract-code-blocks",
+        action="store_true",
+        help="Scan only fenced code blocks in Markdown files",
+    )
     p.add_argument("--nlp-pii", action="store_true", help="Enable heavy NLP PII scanning via spaCy")
-    p.add_argument("--presidio", action="store_true", help="Enable Microsoft Presidio NLP PII scanning")
-    p.add_argument("--language", default="en", metavar="CODE", help="NLP language for spaCy/Presidio (default: en)")
-    p.add_argument("--ps-crosscheck", action="store_true", help="Enable PowerShell cross-check for SSNs and common keys")
-    p.add_argument("--semgrep", action="store_true", help="Enable Semgrep AST static analysis scanning")
-    p.add_argument("--lang-rules", action="store_true", help="Enable language-specific heuristic rule packs (Python, Node.js, Java)")
-    p.add_argument("--ast-filter", action="store_true", help="Enable tree-sitter AST context filtering to reduce false positives")
-    p.add_argument("--deconfuse", action="store_true", help="Normalize Unicode homoglyphs to catch confusable-character attacks")
-    p.add_argument("--perplexity", action="store_true", help="Train a Markov model on safe code to detect anomalous high-entropy strings")
-    p.add_argument("--taint", action="store_true", help="Track secret-bearing variables to sensitive sinks (HTTP, subprocess, logging)")
-    p.add_argument("--steganalysis", action="store_true", help="Detect LSB steganography in image files via RS steganalysis")
-    p.add_argument("--parallel", action="store_true", help="Use multiprocessing for CPU-bound file scanning")
-    p.add_argument("--mmap", action="store_true", help="Use memory-mapped I/O for large files (>1MB)")
-    p.add_argument("--mmap-threshold", type=int, default=1_000_000, metavar="BYTES", help="Minimum file size for mmap (default: 1000000)")
-    p.add_argument("--cache", action="store_true", help="Use disk cache to skip unchanged files on re-scan")
-    p.add_argument("--watch", action="store_true", help="Watch repo for file changes and re-scan modified files (requires watchdog)")
-    p.add_argument("--gitleaks", action="store_true", help="Run Gitleaks external scan and merge findings")
-    p.add_argument("--trivy", action="store_true", help="Run Trivy external scan and merge findings")
-    p.add_argument("--decay", action="store_true", help="Apply decay-weighted scoring to history findings by commit age")
-    p.add_argument("--audit-report", metavar="FILE", help="Generate a tamper-evident JSON audit report")
-    p.add_argument("--fix", action="store_true", help="Auto-redact all found secrets in-place and stage changed files")
-    p.add_argument("--validate", action="store_true", help="Validate found secrets against live APIs (GitHub, HuggingFace, npm, PyPI)")
-    p.add_argument("--validate-timeout", type=int, default=5, metavar="SECONDS", help="API timeout for --validate (default: 5)")
-    p.add_argument("--patterns", metavar="FILE", help="Load extra patterns from a YAML or JSON file")
-    p.add_argument("--config", metavar="FILE", help="TOML config file (default: auto-detect .omni-scan.toml)")
+    p.add_argument(
+        "--presidio", action="store_true", help="Enable Microsoft Presidio NLP PII scanning"
+    )
+    p.add_argument(
+        "--language",
+        default="en",
+        metavar="CODE",
+        help="NLP language for spaCy/Presidio (default: en)",
+    )
+    p.add_argument(
+        "--ps-crosscheck",
+        action="store_true",
+        help="Enable PowerShell cross-check for SSNs and common keys",
+    )
+    p.add_argument(
+        "--semgrep", action="store_true", help="Enable Semgrep AST static analysis scanning"
+    )
+    p.add_argument(
+        "--lang-rules",
+        action="store_true",
+        help="Enable language-specific heuristic rule packs (Python, Node.js, Java)",
+    )
+    p.add_argument(
+        "--ast-filter",
+        action="store_true",
+        help="Enable tree-sitter AST context filtering to reduce false positives",
+    )
+    p.add_argument(
+        "--deconfuse",
+        action="store_true",
+        help="Normalize Unicode homoglyphs to catch confusable-character attacks",
+    )
+    p.add_argument(
+        "--perplexity",
+        action="store_true",
+        help="Train a Markov model on safe code to detect anomalous high-entropy strings",
+    )
+    p.add_argument(
+        "--taint",
+        action="store_true",
+        help="Track secret-bearing variables to sensitive sinks (HTTP, subprocess, logging)",
+    )
+    p.add_argument(
+        "--steganalysis",
+        action="store_true",
+        help="Detect LSB steganography in image files via RS steganalysis",
+    )
+    p.add_argument(
+        "--parallel", action="store_true", help="Use multiprocessing for CPU-bound file scanning"
+    )
+    p.add_argument(
+        "--mmap", action="store_true", help="Use memory-mapped I/O for large files (>1MB)"
+    )
+    p.add_argument(
+        "--mmap-threshold",
+        type=int,
+        default=1_000_000,
+        metavar="BYTES",
+        help="Minimum file size for mmap (default: 1000000)",
+    )
+    p.add_argument(
+        "--cache", action="store_true", help="Use disk cache to skip unchanged files on re-scan"
+    )
+    p.add_argument(
+        "--watch",
+        action="store_true",
+        help="Watch repo for file changes and re-scan modified files (requires watchdog)",
+    )
+    p.add_argument(
+        "--gitleaks", action="store_true", help="Run Gitleaks external scan and merge findings"
+    )
+    p.add_argument(
+        "--trivy", action="store_true", help="Run Trivy external scan and merge findings"
+    )
+    p.add_argument(
+        "--decay",
+        action="store_true",
+        help="Apply decay-weighted scoring to history findings by commit age",
+    )
+    p.add_argument(
+        "--audit-report", metavar="FILE", help="Generate a tamper-evident JSON audit report"
+    )
+    p.add_argument(
+        "--fix",
+        action="store_true",
+        help="Auto-redact all found secrets in-place and stage changed files",
+    )
+    p.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate found secrets against live APIs (GitHub, HuggingFace, npm, PyPI)",
+    )
+    p.add_argument(
+        "--validate-timeout",
+        type=int,
+        default=5,
+        metavar="SECONDS",
+        help="API timeout for --validate (default: 5)",
+    )
+    p.add_argument(
+        "--patterns", metavar="FILE", help="Load extra patterns from a YAML or JSON file"
+    )
+    p.add_argument(
+        "--config", metavar="FILE", help="TOML config file (default: auto-detect .omni-scan.toml)"
+    )
 
     # Remediation
-    p.add_argument("--generate-filter-repo", action="store_true", help="Generate replacements.txt for git-filter-repo scrubbing")
-    p.add_argument("--autofix-gitignore", action="store_true", help="Append flagged secret files to .gitignore (with backup)")
-    p.add_argument("--redact-file", metavar="FILE", help="Redact all secrets and PII from a local file in-place")
-    p.add_argument("--dryrun", "--dry-run", action="store_true", help="Simulate scan/redaction without modifying files")
-    p.add_argument("--self-correct-prompt", nargs="?", const=True, metavar="FILE",
-                   help="Generate an LLM remediation prompt (to stdout or FILE)")
+    p.add_argument(
+        "--generate-filter-repo",
+        action="store_true",
+        help="Generate replacements.txt for git-filter-repo scrubbing",
+    )
+    p.add_argument(
+        "--autofix-gitignore",
+        action="store_true",
+        help="Append flagged secret files to .gitignore (with backup)",
+    )
+    p.add_argument(
+        "--redact-file",
+        metavar="FILE",
+        help="Redact all secrets and PII from a local file in-place",
+    )
+    p.add_argument(
+        "--dryrun",
+        "--dry-run",
+        action="store_true",
+        help="Simulate scan/redaction without modifying files",
+    )
+    p.add_argument(
+        "--self-correct-prompt",
+        nargs="?",
+        const=True,
+        metavar="FILE",
+        help="Generate an LLM remediation prompt (to stdout or FILE)",
+    )
 
     # Hooks & tooling
-    p.add_argument("--install-hook", action="store_true", help="Install a standard fast pre-commit hook")
-    p.add_argument("--install-hook-strict", action="store_true", help="Install a strict pre-commit hook (NLP + PowerShell)")
-    p.add_argument("--print-tool-schema", action="store_true", help="Print OpenAI/Anthropic function-calling schema and exit")
-    p.add_argument("--self-test", action="store_true", help="Run built-in detection validation suite and exit")
+    p.add_argument(
+        "--install-hook", action="store_true", help="Install a standard fast pre-commit hook"
+    )
+    p.add_argument(
+        "--install-hook-strict",
+        action="store_true",
+        help="Install a strict pre-commit hook (NLP + PowerShell)",
+    )
+    p.add_argument(
+        "--print-tool-schema",
+        action="store_true",
+        help="Print OpenAI/Anthropic function-calling schema and exit",
+    )
+    p.add_argument(
+        "--self-test", action="store_true", help="Run built-in detection validation suite and exit"
+    )
 
     # TUI
-    p.add_argument("--tui", action="store_true", help="Launch the interactive terminal user interface")
+    p.add_argument(
+        "--tui", action="store_true", help="Launch the interactive terminal user interface"
+    )
 
     return p
 
@@ -126,6 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 # Utility: self-test
 # ---------------------------------------------------------------------------
+
 
 def run_self_test(quiet: bool = False) -> bool:
     from .detectors import scan_snippet
@@ -135,11 +316,14 @@ def run_self_test(quiet: bool = False) -> bool:
     results = []
     for desc, content, must_detect, must_not_detect in _SELF_TEST_CASES:
         findings = scan_snippet(content, "self-test")
-        all_hits = findings["secrets"] + findings["pii"] + findings["entropy"] + findings.get("injections", [])
+        all_hits = (
+            findings["secrets"]
+            + findings["pii"]
+            + findings["entropy"]
+            + findings.get("injections", [])
+        )
         detected = len(all_hits) > 0
-        if must_detect and detected:
-            status, passed = "PASS", passed + 1
-        elif must_not_detect and not detected:
+        if must_detect and detected or must_not_detect and not detected:
             status, passed = "PASS", passed + 1
         else:
             status, failed = "FAIL", failed + 1
@@ -158,6 +342,7 @@ def run_self_test(quiet: bool = False) -> bool:
 # Utility: LLM tool schema
 # ---------------------------------------------------------------------------
 
+
 def print_tool_schema() -> None:
     schema = {
         "name": "scan_secrets",
@@ -170,9 +355,21 @@ def print_tool_schema() -> None:
             "type": "object",
             "properties": {
                 "text": {"type": "string", "description": "The code or text to scan."},
-                "entropy_threshold": {"type": "number", "description": "Shannon entropy threshold. Default: 3.8", "default": 3.8},
-                "mask": {"type": "boolean", "description": "Redact matched secrets in output. Default: false.", "default": False},
-                "sanitize": {"type": "boolean", "description": "Neutralise injection strings in output. Default: false.", "default": False},
+                "entropy_threshold": {
+                    "type": "number",
+                    "description": "Shannon entropy threshold. Default: 3.8",
+                    "default": 3.8,
+                },
+                "mask": {
+                    "type": "boolean",
+                    "description": "Redact matched secrets in output. Default: false.",
+                    "default": False,
+                },
+                "sanitize": {
+                    "type": "boolean",
+                    "description": "Neutralise injection strings in output. Default: false.",
+                    "default": False,
+                },
             },
             "required": ["text"],
         },
@@ -187,6 +384,7 @@ def print_tool_schema() -> None:
 # ---------------------------------------------------------------------------
 # Utility: autofix .gitignore
 # ---------------------------------------------------------------------------
+
 
 def autofix_gitignore(files_to_add: list[str], dry_run: bool = False) -> int:
     gitignore_path = Path(".gitignore")
@@ -213,6 +411,7 @@ def autofix_gitignore(files_to_add: list[str], dry_run: bool = False) -> int:
 
     if gitignore_path.exists():
         import shutil
+
         shutil.copy(gitignore_path, ".gitignore.bak")
         print("Backed up .gitignore to .gitignore.bak")
 
@@ -230,6 +429,7 @@ def autofix_gitignore(files_to_add: list[str], dry_run: bool = False) -> int:
 # ---------------------------------------------------------------------------
 # Utility: dry-run repo scan
 # ---------------------------------------------------------------------------
+
 
 def run_dryrun_repo_scan(
     repo_dir: str,
@@ -259,9 +459,12 @@ def run_dryrun_repo_scan(
             if rel_root == ".":
                 rel_root = ""
             dirs[:] = [
-                d for d in dirs
+                d
+                for d in dirs
                 if not match_exclude(os.path.join(rel_root, d).replace("\\", "/"), exclude_patterns)
-                and not match_exclude(os.path.join(rel_root, d).replace("\\", "/") + "/", exclude_patterns)
+                and not match_exclude(
+                    os.path.join(rel_root, d).replace("\\", "/") + "/", exclude_patterns
+                )
             ]
             for file in files:
                 file_rel = os.path.join(rel_root, file).replace("\\", "/")
@@ -286,7 +489,7 @@ def run_dryrun_repo_scan(
         return 0
 
     files_to_scan, suspicious_files = get_scan_files(repo_dir)
-    print(f"Working Tree Scan Plan:")
+    print("Working Tree Scan Plan:")
     print(f"  - Total files to scan: {len(files_to_scan)}")
     if suspicious_files:
         print(f"  - Suspicious file names detected ({len(suspicious_files)}):")
@@ -305,9 +508,11 @@ def run_dryrun_repo_scan(
                     for sf in sub_susp[:5]:
                         print(f"    * {sf}")
 
-    print(f"\nGit History Scan Plan:")
+    print("\nGit History Scan Plan:")
     main_commits = get_commit_count(repo_dir, all_branches)
-    print(f"  - Commits to scan: {main_commits}{' (all branches)' if all_branches else ' (active branch)'}")
+    print(
+        f"  - Commits to scan: {main_commits}{' (all branches)' if all_branches else ' (active branch)'}"
+    )
     if reflog:
         print("  - Reflog scan: ENABLED")
     if scan_submodules:
@@ -323,6 +528,7 @@ def run_dryrun_repo_scan(
 # ---------------------------------------------------------------------------
 # Hook installer
 # ---------------------------------------------------------------------------
+
 
 def _install_hook(strict: bool = False) -> None:
     hook_path = Path(".git/hooks/pre-commit")
@@ -355,15 +561,23 @@ def _install_hook(strict: bool = False) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intentional)
-    from .config.loader import load_toml_config, load_external_patterns
+    from .config.loader import load_external_patterns, load_toml_config
     from .detectors import (
-        scan_snippet, scan_history, scan_reflog, scan_diff, scan_stash,
-        scan_current_tree, run_ps_crosscheck, run_semgrep_scan,
-        init_nlp_deidentifier, init_presidio_analyzer,
+        init_nlp_deidentifier,
+        init_presidio_analyzer,
+        run_ps_crosscheck,
+        run_semgrep_scan,
+        scan_current_tree,
+        scan_diff,
+        scan_history,
+        scan_reflog,
+        scan_snippet,
+        scan_stash,
     )
-    from .patterns.secrets import CUSTOM_SECRET_PATTERNS
     from .patterns.pii import CUSTOM_PII_PATTERNS
+    from .patterns.secrets import CUSTOM_SECRET_PATTERNS
     from .reporters import generate_report, generate_self_correct_prompt
     from .reporters.base import deduplicate_findings
     from .tui import run_tui
@@ -407,21 +621,39 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
 
     # ── --watch: continuous monitoring mode ──────────────────────────────────
     if args.watch:
-        from omni_secret_scanner.detectors.watchdog import run_watch_mode
         from omni_secret_scanner.detectors.file_tree import _scan_single_file
+        from omni_secret_scanner.detectors.watchdog import run_watch_mode
 
         def _scan_watch_file(filepath: str) -> dict:
             """Adapter: scan a single file for watchdog mode."""
             from pathlib import Path as _Path
+
             from omni_secret_scanner.patterns import ALL_SECRET_PATTERNS
+
             p = _Path(filepath)
-            job = (p, str(p), 1024 * 1024 * 10, ALL_SECRET_PATTERNS,
-                   [], [], False, None, None, False, False, False, False,
-                   False, None, False, None, {})
+            job: tuple = (
+                p,
+                str(p),
+                1024 * 1024 * 10,
+                ALL_SECRET_PATTERNS,
+                [],
+                [],
+                False,
+                None,
+                None,
+                False,
+                False,
+                False,
+                False,
+                False,
+                None,
+                False,
+                None,
+                {},
+            )
             return _scan_single_file(job)
 
-        run_watch_mode(repo_dir, _scan_watch_file,
-                       _DEFAULT_EXCLUDE_PATTERNS, quiet=args.quiet)
+        run_watch_mode(repo_dir, _scan_watch_file, _DEFAULT_EXCLUDE_PATTERNS, quiet=args.quiet)
         return 0
 
     # ── Load .omni-scan.toml (CLI flags take precedence) ────────────────────
@@ -437,8 +669,6 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     deconfuse_enabled = getattr(args, "deconfuse", False)
     taint_enabled = getattr(args, "taint", False)
     stego_enabled = getattr(args, "steganalysis", False)
-    perplexity_enabled = getattr(args, "perplexity", False)
-    parallel_enabled = getattr(args, "parallel", False)
     mmap_enabled = getattr(args, "mmap", False)
     cache_enabled = getattr(args, "cache", False)
 
@@ -460,6 +690,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     # Apply TOML custom patterns
     if toml_config:
         import re as _re
+
         for entry in toml_config.get("custom_secrets", []):
             if isinstance(entry, dict) and "name" in entry and "pattern" in entry:
                 try:
@@ -503,7 +734,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
             return 0
 
         snippet_findings = scan_snippet(
-            content, source,
+            content,
+            source,
             entropy_threshold=args.entropy_threshold,
             ignore_tokens=ignore_tokens,
             extract_code_blocks=args.extract_code_blocks,
@@ -517,14 +749,25 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
             "commits": [],
             "injections": snippet_findings.get("injections", []),
         }
-        tree_findings = {"suspicious_files": [], "current_secrets": [], "nlp_pii": [], "injections": []}
+        tree_findings: dict[str, list] = {
+            "suspicious_files": [],
+            "current_secrets": [],
+            "nlp_pii": [],
+            "injections": [],
+        }
         injection_findings = snippet_findings.get("injections", [])
 
         total_issues = generate_report(
-            history_findings, tree_findings, [],
-            args.output, args.format, mask=args.mask,
-            context_lines=args.context_lines, show_score=args.confidence_score,
-            snippet_content=content, injection_findings=injection_findings,
+            history_findings,
+            tree_findings,
+            [],
+            args.output,
+            args.format,
+            mask=args.mask,
+            context_lines=args.context_lines,
+            show_score=args.confidence_score,
+            snippet_content=content,
+            injection_findings=injection_findings,
             sanitize=args.sanitize,
         )
         return 1 if total_issues > 0 else 0
@@ -537,7 +780,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     # ── Dry-run ──────────────────────────────────────────────────────────────
     if args.dryrun:
         run_dryrun_repo_scan(
-            repo_dir, exclude_patterns,
+            repo_dir,
+            exclude_patterns,
             scan_submodules=args.submodules,
             all_branches=args.all_branches,
             reflog=args.reflog,
@@ -552,24 +796,39 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
         if not args.quiet:
             print(f"Running incremental diff scan since '{diff_base}'...", file=sys.stderr)
         history_findings = scan_diff(
-            diff_base, exclude_patterns, quiet=args.quiet,
+            diff_base,
+            exclude_patterns,
+            quiet=args.quiet,
             entropy_threshold=args.entropy_threshold,
-            ignore_tokens=ignore_tokens, sensitive_words=sensitive_words,
+            ignore_tokens=ignore_tokens,
+            sensitive_words=sensitive_words,
         )
     elif fast_mode:
-        history_findings = {"secrets": [], "pii": [], "entropy": [], "commits": [], "injections": []}
+        history_findings = {
+            "secrets": [],
+            "pii": [],
+            "entropy": [],
+            "commits": [],
+            "injections": [],
+        }
     else:
         history_findings = scan_history(
-            exclude_patterns, args.all_branches, quiet=args.quiet,
+            exclude_patterns,
+            args.all_branches,
+            quiet=args.quiet,
             entropy_threshold=args.entropy_threshold,
-            ignore_tokens=ignore_tokens, sensitive_words=sensitive_words,
-            since=args.since, scan_submodules=args.submodules,
+            ignore_tokens=ignore_tokens,
+            sensitive_words=sensitive_words,
+            since=args.since,
+            scan_submodules=args.submodules,
         )
         if args.reflog:
             reflog_findings = scan_reflog(
-                exclude_patterns, quiet=args.quiet,
+                exclude_patterns,
+                quiet=args.quiet,
                 entropy_threshold=args.entropy_threshold,
-                ignore_tokens=ignore_tokens, sensitive_words=sensitive_words,
+                ignore_tokens=ignore_tokens,
+                sensitive_words=sensitive_words,
             )
             history_findings["secrets"].extend(reflog_findings["secrets"])
             history_findings["pii"].extend(reflog_findings["pii"])
@@ -577,17 +836,26 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
             history_findings["injections"].extend(reflog_findings.get("injections", []))
 
     # Deduplicate history
-    history_findings["secrets"] = deduplicate_findings(history_findings["secrets"], ("type", "file", "line", "match"))
-    history_findings["pii"] = deduplicate_findings(history_findings["pii"], ("type", "file", "line", "match"))
-    history_findings["entropy"] = deduplicate_findings(history_findings["entropy"], ("file", "line", "token"))
-    history_findings["injections"] = deduplicate_findings(history_findings.get("injections", []), ("type", "file", "match"))
+    history_findings["secrets"] = deduplicate_findings(
+        history_findings["secrets"], ("type", "file", "line", "match")
+    )
+    history_findings["pii"] = deduplicate_findings(
+        history_findings["pii"], ("type", "file", "line", "match")
+    )
+    history_findings["entropy"] = deduplicate_findings(
+        history_findings["entropy"], ("file", "line", "token")
+    )
+    history_findings["injections"] = deduplicate_findings(
+        history_findings.get("injections", []), ("type", "file", "match")
+    )
 
     # ── Current tree scan ────────────────────────────────────────────────────
     max_file_size_kb = getattr(args, "max_file_size", 1024)
 
     # Build combined regex for faster single-pass matching
-    from omni_secret_scanner.patterns.combined import build_combined_pattern, build_name_map
     from omni_secret_scanner.patterns import ALL_SECRET_PATTERNS
+    from omni_secret_scanner.patterns.combined import build_combined_pattern, build_name_map
+
     combined_pattern = build_combined_pattern(ALL_SECRET_PATTERNS) if not fast_mode else None
     name_map = build_name_map(ALL_SECRET_PATTERNS) if combined_pattern else {}
 
@@ -595,13 +863,18 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     scan_cache = None
     if cache_enabled:
         from omni_secret_scanner.utils.cache import ScanCache
+
         scan_cache = ScanCache(repo_dir)
         if not args.quiet:
             stats = scan_cache.stats()
-            print(f"Cache: {stats['total']} entries ({stats['recent_24h']} from last 24h)", file=sys.stderr)
+            print(
+                f"Cache: {stats['total']} entries ({stats['recent_24h']} from last 24h)",
+                file=sys.stderr,
+            )
 
     tree_findings = scan_current_tree(
-        repo_dir, exclude_patterns,
+        repo_dir,
+        exclude_patterns,
         None if fast_mode else nlp_deidentifier,
         quiet=args.quiet,
         ignore_tokens=ignore_tokens,
@@ -623,9 +896,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     # ── Stash scan ───────────────────────────────────────────────────────────
     if getattr(args, "scan_stash", False):
         stash_findings = scan_stash(
-            exclude_patterns, quiet=args.quiet,
+            exclude_patterns,
+            quiet=args.quiet,
             entropy_threshold=args.entropy_threshold,
-            ignore_tokens=ignore_tokens, sensitive_words=sensitive_words,
+            ignore_tokens=ignore_tokens,
+            sensitive_words=sensitive_words,
         )
         history_findings["secrets"].extend(stash_findings["secrets"])
         history_findings["pii"].extend(stash_findings["pii"])
@@ -645,13 +920,20 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
             ("type", "match"),
         )
         if all_secrets and not args.quiet:
-            print(f"Validating {len(all_secrets)} unique secrets against live APIs...", file=sys.stderr)
+            print(
+                f"Validating {len(all_secrets)} unique secrets against live APIs...",
+                file=sys.stderr,
+            )
         for i, s in enumerate(all_secrets):
             val_result = validate_secret(s["type"], s["match"], timeout=args.validate_timeout)
-            val_result.update({
-                "original_type": s["type"], "original_match": s["match"],
-                "original_file": s.get("file", ""), "original_line": s.get("line", 0),
-            })
+            val_result.update(
+                {
+                    "original_type": s["type"],
+                    "original_match": s["match"],
+                    "original_file": s.get("file", ""),
+                    "original_line": s.get("line", 0),
+                }
+            )
             validated_secrets.append(val_result)
             if i < len(all_secrets) - 1:
                 time.sleep(1)  # rate-limit: 1 request per second
@@ -666,6 +948,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     # Apply decay-weighted scoring if --decay is active
     if getattr(args, "decay", False):
         from omni_secret_scanner.utils.decay import apply_decay_to_findings
+
         apply_decay_to_findings(history_findings.get("secrets", []))
         apply_decay_to_findings(history_findings.get("pii", []))
         apply_decay_to_findings(history_findings.get("injections", []))
@@ -674,27 +957,39 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     ext_findings: list[dict] = []
     if getattr(args, "gitleaks", False):
         from omni_secret_scanner.detectors.external import run_gitleaks
+
         ext_findings.extend(run_gitleaks(repo_dir, quiet=args.quiet))
     if getattr(args, "trivy", False):
         from omni_secret_scanner.detectors.external import run_trivy
+
         ext_findings.extend(run_trivy(repo_dir, quiet=args.quiet))
     if ext_findings:
         tree_findings.setdefault("current_secrets", []).extend(ext_findings)
 
     total_issues = generate_report(
-        history_findings, tree_findings, ps_findings,
-        args.output, args.format, mask=args.mask,
-        context_lines=args.context_lines, show_score=args.confidence_score,
-        semgrep_findings=semgrep_findings, injection_findings=injection_findings,
-        sanitize=args.sanitize, validated_secrets=validated_secrets,
+        history_findings,
+        tree_findings,
+        ps_findings,
+        args.output,
+        args.format,
+        mask=args.mask,
+        context_lines=args.context_lines,
+        show_score=args.confidence_score,
+        semgrep_findings=semgrep_findings,
+        injection_findings=injection_findings,
+        sanitize=args.sanitize,
+        validated_secrets=validated_secrets,
     )
 
     # ── Self-correct prompt ──────────────────────────────────────────────────
     if getattr(args, "self_correct_prompt", None) is not None:
         all_findings = deduplicate_findings(
-            history_findings.get("secrets", []) + tree_findings.get("current_secrets", [])
-            + history_findings.get("pii", []) + tree_findings.get("nlp_pii", [])
-            + history_findings.get("injections", []) + tree_findings.get("injections", []),
+            history_findings.get("secrets", [])
+            + tree_findings.get("current_secrets", [])
+            + history_findings.get("pii", [])
+            + tree_findings.get("nlp_pii", [])
+            + history_findings.get("injections", [])
+            + tree_findings.get("injections", []),
             ("type", "file", "line", "match"),
         )
         prompt = generate_self_correct_prompt(all_findings, context_lines=args.context_lines)
@@ -721,16 +1016,20 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     # ── --fix: auto-redact all found secrets ─────────────────────────────────
     if getattr(args, "fix", False):
         from omni_secret_scanner.utils.fix import (
-            redact_findings_in_files, stage_and_suggest_commit,
+            redact_findings_in_files,
+            stage_and_suggest_commit,
         )
+
         all_secrets = (
             history_findings.get("secrets", [])
             + tree_findings.get("current_secrets", [])
             + tree_findings.get("nlp_pii", [])
         )
         modified = redact_findings_in_files(
-            all_secrets, repo_dir,
-            dry_run=args.dryrun, quiet=args.quiet,
+            all_secrets,
+            repo_dir,
+            dry_run=args.dryrun,
+            quiet=args.quiet,
         )
         if modified and not args.dryrun:
             stage_and_suggest_commit(modified, repo_dir, quiet=args.quiet)
@@ -738,6 +1037,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     # ── --audit-report: tamper-evident JSON report ───────────────────────────
     if getattr(args, "audit_report", None):
         from omni_secret_scanner.reporters.audit import generate_audit_report
+
         summary = {
             "files_scanned": len(tree_findings.get("current_secrets", [])),
             "history_secrets": history_findings.get("secrets", []),
@@ -751,8 +1051,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
         }
         audit_hash = generate_audit_report(repo_dir, summary, args.audit_report)
         if not args.quiet:
-            print(f"Audit report written to {args.audit_report} (SHA-256: {audit_hash})",
-                  file=sys.stderr)
+            print(
+                f"Audit report written to {args.audit_report} (SHA-256: {audit_hash})",
+                file=sys.stderr,
+            )
 
     return 1 if total_issues > 0 else 0
 
@@ -760,6 +1062,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _apply_toml_defaults(args: argparse.Namespace, cfg: dict) -> None:
     """Merge TOML config values into *args*, CLI flags take precedence."""

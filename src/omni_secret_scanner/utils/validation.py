@@ -5,11 +5,11 @@ import urllib.error
 import urllib.request
 
 SECRET_VALIDATORS: dict[str, tuple] = {
-    "GitHub Token":        ("https://api.github.com/user", "GET", "token", 200, None),
+    "GitHub Token": ("https://api.github.com/user", "GET", "token", 200, None),
     "GitHub Fine-grained": ("https://api.github.com/user", "GET", "Bearer", 200, None),
-    "HuggingFace":         ("https://huggingface.co/api/whoami", "GET", "Bearer", 200, None),
-    "npm token":           ("https://registry.npmjs.org/-/whoami", "GET", "Bearer", 200, None),
-    "PyPI token":          ("https://pypi.org/pypi", "POST", None, None, "403_vs_401"),
+    "HuggingFace": ("https://huggingface.co/api/whoami", "GET", "Bearer", 200, None),
+    "npm token": ("https://registry.npmjs.org/-/whoami", "GET", "Bearer", 200, None),
+    "PyPI token": ("https://pypi.org/pypi", "POST", None, None, "403_vs_401"),
 }
 
 

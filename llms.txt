@@ -1,0 +1,108 @@
+# RGT Codebase Scanner — LLM usage guide
+# Run `rgt-scan --tool-schema` for machine-readable JSON.
+
+Tool: rgt-scan
+Aliases: omni-scan (legacy)
+Version: 9.0.0
+Purpose: Scan codebases, files, URLs, Docker images, and environment variables
+         for secrets, PII, high-entropy tokens, and prompt injection.
+
+## Modes
+
+quick  No extra dependencies. Regex-based secrets, PII, entropy analysis, git
+       history. Runs in under 5 seconds on most repos. Use this by default.
+
+full   Requires `pip install "rgt-codebase-scanner[all]"`. Adds NLP/Presidio
+       PII detection, AST context filtering, Semgrep SAST, perplexity and
+       homoglyph analysis, taint flow, steganography detection, external tools
+       (gitleaks, trivy), and watch mode.
+
+## Entry point
+
+rgt-scan [OPTIONS] [PATH]
+
+## Key flags
+
+--target-type {repo,path,url,docker,env,clipboard}
+    What to scan. Default: repo (local git repository).
+    path    = file or directory tree
+    url     = fetch raw content from URL
+    docker  = scan Docker image layers
+    env     = scan current process environment variables
+    clipboard = read from system clipboard
+
+--format {text,json,sarif,html}
+    Output format. Default: text. Use json or sarif for programmatic use.
+
+--output FILE
+    Write report to FILE instead of stdout.
+
+--pii            Enable regex-based PII detection.
+--nlp            Enable spaCy NLP PII detection (requires [nlp] extra).
+--presidio       Enable Microsoft Presidio PII (requires [presidio] extra).
+--injection      Enable prompt-injection pattern detection.
+--entropy-threshold FLOAT
+                 Minimum Shannon entropy to flag a token. Default: 4.5.
+--mask           Mask secret values in output.
+--quiet          Suppress warnings and progress messages.
+--all-branches   Scan all git branches, not just HEAD.
+--exclude PATTERN
+                 Skip paths matching PATTERN (glob).
+--tool-schema    Print OpenAI/Anthropic function-calling JSON schema and exit.
+--self-test      Run built-in self-test and exit.
+
+## Typical invocations
+
+Scan current repo (quick):
+    rgt-scan
+
+Scan a directory:
+    rgt-scan --target-type path /path/to/dir
+
+Scan a URL:
+    rgt-scan --target-type url https://example.com/raw/file.txt
+
+Scan Docker image:
+    rgt-scan --target-type docker myimage:latest
+
+Scan env vars:
+    rgt-scan --target-type env
+
+JSON output to file:
+    rgt-scan --format json --output findings.json
+
+SARIF for GitHub Code Scanning:
+    rgt-scan --format sarif --output results.sarif
+
+Full scan with NLP:
+    rgt-scan --pii --nlp --presidio --injection --mask
+
+## Configuration file
+
+Place `.omni-scan.toml` in the repo root for persistent settings:
+
+    [scanner]
+    entropy_threshold = 4.5
+    mask = true
+
+    [exclude]
+    patterns = ["*.lock", "node_modules/"]
+    tokens   = ["EXAMPLE", "placeholder"]
+
+    [custom_patterns]
+    secrets = [{ name = "Corp Key", pattern = "corp_[A-Za-z0-9]{32}" }]
+
+## Output schema (--format json)
+
+{
+  "secrets":     [ { "file": str, "line": int, "type": str, "value": str } ],
+  "pii":         [ { "file": str, "line": int, "type": str, "value": str } ],
+  "high_entropy":[ { "file": str, "line": int, "token": str, "entropy": float } ],
+  "history":     { "<commit>": [ ... ] },
+  "summary":     { "total_findings": int, "files_scanned": int }
+}
+
+## Part of the RGT suite
+
+rgt-scan is one tool in the RGT suite. Other tools share the same
+`.omni-scan.toml` configuration convention and `rgt-` CLI prefix.

@@ -3,9 +3,9 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "omni-secret-scanner"
+name = "rgt-codebase-scanner"
 version = "9.0.0"
-description = "Enterprise-grade scanner for secrets, PII, high-entropy tokens, and prompt injection"
+description = "RGT Codebase Scanner — part of the RGT suite"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -51,7 +51,8 @@ dev = [
 ]
 
 [project.scripts]
-omni-scan = "omni_secret_scanner.cli:entry_point"
+rgt-scan = "rgt_codebase_scanner.cli:entry_point"
+omni-scan = "rgt_codebase_scanner.cli:entry_point"
 
 [project.urls]
 Homepage = "https://github.com/williamhudspeth/omni-secret-scanner"
@@ -74,7 +75,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
-ignore = ["E501", "B008", "SIM108"]
+ignore = ["E501", "E701", "B008", "SIM102", "SIM103", "SIM105", "SIM108", "SIM110"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
@@ -94,3 +95,4 @@ warn_unused_ignores = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+pythonpath = ["src"]

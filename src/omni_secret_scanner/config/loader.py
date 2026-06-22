@@ -46,8 +46,16 @@ def load_toml_config(path: str | None = None, repo_dir: str | None = None) -> di
 
     scanner_cfg = toml_data.get("scanner", {})
     for key in (
-        "entropy_threshold", "max_file_size_kb", "fast", "quiet",
-        "mask", "sanitize", "validate", "all_branches", "progress", "context_lines",
+        "entropy_threshold",
+        "max_file_size_kb",
+        "fast",
+        "quiet",
+        "mask",
+        "sanitize",
+        "validate",
+        "all_branches",
+        "progress",
+        "context_lines",
     ):
         if key in scanner_cfg:
             config[key] = scanner_cfg[key]
@@ -89,7 +97,8 @@ def load_external_patterns(path: str, quiet: bool = False) -> tuple[dict, dict]:
         return extra_secrets, extra_pii
     try:
         if p.suffix in (".yaml", ".yml"):
-            import yaml  # type: ignore
+            import yaml  # type: ignore[import-untyped]
+
             data = yaml.safe_load(p.read_text(encoding="utf-8"))
         else:
             data = json.loads(p.read_text(encoding="utf-8"))

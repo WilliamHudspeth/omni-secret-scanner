@@ -13,7 +13,7 @@ import hashlib
 import json
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .. import __version__
@@ -24,7 +24,10 @@ def _get_git_commit(repo_dir: str) -> str:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=repo_dir, capture_output=True, text=True, timeout=5,
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         return result.stdout.strip()
     except Exception:
@@ -40,7 +43,7 @@ def generate_audit_report(
 
     Returns the SHA-256 hash of the report content (before embedding).
     """
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     git_commit = _get_git_commit(repo_dir)
 
     payload: dict = {
@@ -69,9 +72,16 @@ def generate_audit_report(
 def _sanitize_summary(summary: dict) -> dict:
     """Strip large/raw match data from summary for audit report compactness."""
     safe = {}
-    for key in ("secrets_count", "pii_count", "entropy_count",
-                 "injection_count", "taint_count", "stego_count",
-                 "safety_score", "injection_risk"):
+    for key in (
+        "secrets_count",
+        "pii_count",
+        "entropy_count",
+        "injection_count",
+        "taint_count",
+        "stego_count",
+        "safety_score",
+        "injection_risk",
+    ):
         if key in summary:
             safe[key] = summary[key]
     # Counts from findings lists
@@ -112,5 +122,4 @@ def verify_audit_report(report_path: str) -> dict:
             "computed_hash": computed_hash,
         }
     except Exception as e:
-        return {"valid": False, "stored_hash": "", "computed_hash": "",
-                "error": str(e)}
+        return {"valid": False, "stored_hash": "", "computed_hash": "", "error": str(e)}
