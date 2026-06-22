@@ -562,6 +562,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
 
     # Build combined regex for faster single-pass matching
     from omni_secret_scanner.patterns.combined import build_combined_pattern, build_name_map
+    from omni_secret_scanner.patterns import ALL_SECRET_PATTERNS
     combined_pattern = build_combined_pattern(ALL_SECRET_PATTERNS) if not fast_mode else None
     name_map = build_name_map(ALL_SECRET_PATTERNS) if combined_pattern else {}
 
