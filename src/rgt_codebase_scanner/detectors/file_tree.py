@@ -6,6 +6,7 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
 from ..patterns import (
     ALL_SECRET_PATTERNS,
@@ -27,6 +28,97 @@ from .ast_filter import ast_context_filter
 from .snippet import scan_ipynb, scan_obfuscated_secrets, scan_pbix
 from .stego import detect_lsb_steganography, is_stego_candidate
 from .taint import taint_analysis
+
+
+def _run_pattern_scan(
+    lines: list[str],
+    file_rel_path: str,
+    all_secret_patterns: dict,
+    ignore_tokens: list[str],
+    sensitive_words: list[str],
+    deconfuse_enabled: bool,
+    combined_pattern: Any,
+    name_map: dict,
+) -> tuple[list[dict], list[dict]]:
+    """Run per-line pattern matching for secrets, PII, and injections.
+
+    Returns (current_secrets, injections) lists.
+    """
+    current_secrets: list[dict] = []
+    injections: list[dict] = []
+
+    _match_fn = deconfuse_and_match if deconfuse_enabled else None
+
+    for idx, line in enumerate(lines):
+        line_no = idx + 1
+
+        # Combined regex fast path: one pass per line
+        if combined_pattern and not _match_fn:
+            for name, val in combined_pattern_find(line, combined_pattern, name_map):
+                if val not in ignore_tokens:
+                    current_secrets.append(
+                        {"type": name, "file": file_rel_path, "line": line_no, "match": val}
+                    )
+        else:
+            for name, pattern in all_secret_patterns.items():
+                try:
+                    if _match_fn:
+                        for m, _ in _match_fn(line, pattern):
+                            val = m.group(0).strip()
+                            if val not in ignore_tokens:
+                                current_secrets.append(
+                                    {"type": name, "file": file_rel_path, "line": line_no, "match": val}
+                                )
+                    else:
+                        for m in re.finditer(pattern, line):
+                            val = m.group(0).strip()
+                            if val not in ignore_tokens:
+                                current_secrets.append(
+                                    {"type": name, "file": file_rel_path, "line": line_no, "match": val}
+                                )
+                except re.error:
+                    pass
+
+        for hit in scan_obfuscated_secrets(line, file_rel_path, all_secret_patterns):
+            if hit["match"] not in ignore_tokens:
+                hit["line"] = line_no
+                current_secrets.append(hit)
+
+        for word in sensitive_words:
+            if word.lower() in line.lower():
+                for m in re.finditer(re.escape(word), line, re.IGNORECASE):
+                    val = m.group(0)
+                    if val not in ignore_tokens:
+                        current_secrets.append(
+                            {"type": f"Sensitive Word: {word}", "file": file_rel_path, "line": line_no, "match": val}
+                        )
+
+        for name, pattern in CUSTOM_PII_PATTERNS.items():
+            if _match_fn:
+                for m, _ in _match_fn(line, pattern):
+                    val = m.group(0).strip()
+                    if val not in ignore_tokens:
+                        current_secrets.append(
+                            {"type": f"PII:{name}", "file": file_rel_path, "line": line_no, "match": val}
+                        )
+            else:
+                for m in re.finditer(pattern, line):
+                    val = m.group(0).strip()
+                    if val not in ignore_tokens:
+                        current_secrets.append(
+                            {"type": f"PII:{name}", "file": file_rel_path, "line": line_no, "match": val}
+                        )
+
+        for inj_name, inj_pattern in INJECTION_PATTERNS.items():
+            try:
+                for m in re.finditer(inj_pattern, line):
+                    injections.append(
+                        {"type": f"INJECTION:{inj_name}", "file": file_rel_path, "line": line_no, "match": m.group(0).strip()}
+                    )
+            except re.error:
+                pass
+
+    return current_secrets, injections
 
 
 def _scan_single_file(job: tuple) -> dict:
@@ -130,109 +222,14 @@ def _scan_single_file(job: tuple) -> dict:
             content = "\n".join(blocks)
 
     lines = content.splitlines()
-    for idx, line in enumerate(lines):
-        line_no = idx + 1
 
-        # Determine which match function to use
-        _match_fn = deconfuse_and_match if deconfuse_enabled else None
-
-        # Combined regex fast path: one pass per line instead of len(patterns) passes
-        if combined_pattern and not _match_fn:
-            for name, val in combined_pattern_find(line, combined_pattern, name_map):
-                if val not in ignore_tokens:
-                    result["current_secrets"].append(
-                        {"type": name, "file": file_rel_path, "line": line_no, "match": val}
-                    )
-        else:
-            for name, pattern in all_secret_patterns.items():
-                try:
-                    if _match_fn:
-                        matches = _match_fn(line, pattern)
-                        for m, _ in matches:
-                            val = m.group(0).strip()
-                            if val not in ignore_tokens:
-                                result["current_secrets"].append(
-                                    {
-                                        "type": name,
-                                        "file": file_rel_path,
-                                        "line": line_no,
-                                        "match": val,
-                                    }
-                                )
-                    else:
-                        for m in re.finditer(pattern, line):
-                            val = m.group(0).strip()
-                            if val not in ignore_tokens:
-                                result["current_secrets"].append(
-                                    {
-                                        "type": name,
-                                        "file": file_rel_path,
-                                        "line": line_no,
-                                        "match": val,
-                                    }
-                                )
-                except re.error:
-                    pass
-
-        for hit in scan_obfuscated_secrets(line, file_rel_path, all_secret_patterns):
-            if hit["match"] not in ignore_tokens:
-                hit["line"] = line_no
-                result["current_secrets"].append(hit)
-
-        for word in sensitive_words:
-            if word.lower() in line.lower():
-                for m in re.finditer(re.escape(word), line, re.IGNORECASE):
-                    val = m.group(0)
-                    if val not in ignore_tokens:
-                        result["current_secrets"].append(
-                            {
-                                "type": f"Sensitive Word: {word}",
-                                "file": file_rel_path,
-                                "line": line_no,
-                                "match": val,
-                            }
-                        )
-
-        for name, pattern in CUSTOM_PII_PATTERNS.items():
-            if _match_fn:
-                matches = _match_fn(line, pattern)
-                for m, _ in matches:
-                    val = m.group(0).strip()
-                    if val not in ignore_tokens:
-                        result["current_secrets"].append(
-                            {
-                                "type": f"PII:{name}",
-                                "file": file_rel_path,
-                                "line": line_no,
-                                "match": val,
-                            }
-                        )
-            else:
-                for m in re.finditer(pattern, line):
-                    val = m.group(0).strip()
-                    if val not in ignore_tokens:
-                        result["current_secrets"].append(
-                            {
-                                "type": f"PII:{name}",
-                                "file": file_rel_path,
-                                "line": line_no,
-                                "match": val,
-                            }
-                        )
-
-        for inj_name, inj_pattern in INJECTION_PATTERNS.items():
-            try:
-                for m in re.finditer(inj_pattern, line):
-                    result["injections"].append(
-                        {
-                            "type": f"INJECTION:{inj_name}",
-                            "file": file_rel_path,
-                            "line": line_no,
-                            "match": m.group(0).strip(),
-                        }
-                    )
-            except re.error:
-                pass
+    # ── Pattern scanning (secrets, PII, injections) ────────────────────────
+    pattern_secrets, pattern_injections = _run_pattern_scan(
+        lines, file_rel_path, all_secret_patterns, ignore_tokens,
+        sensitive_words, deconfuse_enabled, combined_pattern, name_map,
+    )
+    result["current_secrets"].extend(pattern_secrets)
+    result["injections"].extend(pattern_injections)
 
     _NLP_EXTS = {".txt", ".md", ".csv", ".json", ".yml", ".yaml", ".py"}
     if nlp_deidentifier and path.suffix in _NLP_EXTS:
