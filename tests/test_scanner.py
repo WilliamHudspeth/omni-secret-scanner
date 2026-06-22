@@ -1420,3 +1420,149 @@ class TestAutoFix:
 def test_watchdog_importable():
     """run_watch_mode should be importable (actual run requires watchdog)."""
     assert callable(run_watch_mode)
+
+
+# ==============================================================================
+# 33. Phase 14 — LLM Triage Pipeline
+# ==============================================================================
+
+from omni_secret_scanner.llm.middleware import (
+    extract_all_findings, group_by_file, prune_findings,
+    classify_risk, build_stats,
+)
+from omni_secret_scanner.llm.orchestrator import (
+    TriageOrchestrator, _deterministic_triage, create_provider,
+)
+from omni_secret_scanner.llm.prompts import (
+    build_file_prompt, build_summary_prompt, TRIAGE_SYSTEM_PROMPT,
+    EXPLOITABILITY_SYSTEM_PROMPT,
+)
+from omni_secret_scanner.llm.tools import (
+    get_tool_schema, execute_tool_call,
+)
+
+
+class TestLLMMiddleware:
+    """Tests for JSON parsing, grouping, and pruning."""
+
+    def test_extract_all_findings(self):
+        scan_data = {
+            "findings": {
+                "history": {"secrets": [{"type": "Test", "file": "a.py", "match": "x"}]},
+                "current_tree": {"current_secrets": [], "nlp_pii": [], "injections": []},
+                "injection_attacks": [],
+                "semgrep_sast": [],
+                "validated_secrets": [],
+            }
+        }
+        findings = extract_all_findings(scan_data)
+        assert len(findings) == 1
+        assert findings[0]["_source"] == "history/secrets"
+
+    def test_group_by_file(self):
+        findings = [
+            {"type": "A", "file": "a.py", "match": "x"},
+            {"type": "B", "file": "a.py", "match": "y"},
+            {"type": "C", "file": "b.py", "match": "z"},
+        ]
+        grouped = group_by_file(findings)
+        assert len(grouped["a.py"]) == 2
+        assert len(grouped["b.py"]) == 1
+
+    def test_prune_removes_known_noise(self):
+        findings = [
+            {"type": "Cloudflare API Key", "file": "a.py", "match": "---"},
+            {"type": "Pinecone", "file": "b.py", "match": "uuid"},
+            {"type": "PRONOUN", "file": "c.py", "match": "he"},
+            {"type": "AWS Access Key ID", "file": "d.py", "match": "AKIA..."},
+        ]
+        grouped = group_by_file(findings)
+        cleaned = prune_findings(grouped)
+        # Only the AWS key should survive
+        assert "d.py" in cleaned
+        assert "a.py" not in cleaned
+
+    def test_classify_risk_levels(self):
+        assert classify_risk([{"_source": "validated"}]) == "critical"
+        assert classify_risk([{"_source": "stego"}]) == "critical"
+        assert classify_risk([{"_source": "taint"}]) == "high"
+        assert classify_risk([{"_source": "injection"}]) == "medium"
+        assert classify_risk([{"_source": "tree/current_secrets"}]) == "low"
+
+    def test_build_stats(self):
+        grouped = {"a.py": [{"type": "AWS Key", "_source": "tree"}], "b.py": []}
+        scan_data = {"summary": {"safety_score": 50}}
+        stats = build_stats(grouped, scan_data)
+        assert stats["total_findings"] == 1
+        assert stats["files_affected"] == 2
+
+
+class TestLLMPrompts:
+    """Tests for prompt templates."""
+
+    def test_triage_prompt_exists(self):
+        assert len(TRIAGE_SYSTEM_PROMPT) > 50
+        assert "TRUE_POSITIVE" in TRIAGE_SYSTEM_PROMPT
+
+    def test_exploitability_prompt_exists(self):
+        assert len(EXPLOITABILITY_SYSTEM_PROMPT) > 100
+        assert "exploitability" in EXPLOITABILITY_SYSTEM_PROMPT.lower()
+
+    def test_build_file_prompt(self):
+        prompt = build_file_prompt("test.py", [], "high", "code here", "summary")
+        assert "test.py" in prompt
+        assert "HIGH" in prompt
+
+    def test_build_summary_prompt(self):
+        stats = {"total_findings": 10, "files_affected": 3, "by_risk": {"high": 2},
+                 "safety_score": 50, "injection_risk": 20, "validated_live": 1,
+                 "validated_expired": 0}
+        prompt = build_summary_prompt(stats, [("a.py", "high", 5)])
+        assert "10" in prompt
+        assert "HIGH" in prompt
+
+
+class TestLLMOrchestrator:
+    """Tests for tiered inference routing."""
+
+    def test_deterministic_triage(self):
+        findings = [
+            {"type": "Cloudflare API Key", "file": "a.py", "match": "---"},
+            {"type": "AWS Access Key ID", "file": "b.py", "match": "AKIA..."},
+        ]
+        results = _deterministic_triage(findings)
+        assert results[0]["triage_verdict"] == "FALSE_POSITIVE"
+        assert results[1]["triage_verdict"] == "TRUE_POSITIVE"
+
+    def test_orchestrator_no_model(self):
+        orch = TriageOrchestrator(tier1=None, tier2=None)
+        findings = [{"type": "Test", "file": "x.py", "match": "y", "_source": "tree"}]
+        results = orch.triage_file("x.py", findings, "low", "code")
+        assert len(results) == 1
+        assert "triage_verdict" in results[0]
+
+    def test_create_provider_none(self):
+        assert create_provider("none") is None
+
+    def test_create_provider_unknown(self):
+        assert create_provider("garbage") is None
+
+
+class TestLLMTools:
+    """Tests for function-calling tools."""
+
+    def test_get_tool_schema(self):
+        schema = get_tool_schema()
+        assert schema["name"] == "scan_secrets"
+        assert "text" in schema["parameters"]["properties"]
+
+    def test_execute_tool_call(self):
+        result = execute_tool_call("scan_secrets", {
+            "text": "key = 'AKIAIO...MPLE'"
+        })
+        assert "findings" in result
+        assert "safety_score" in result
+
+    def test_execute_unknown_tool(self):
+        result = execute_tool_call("nonexistent", {})
+        assert "error" in result

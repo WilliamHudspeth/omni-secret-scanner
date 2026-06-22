@@ -229,6 +229,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Auto-redact all found secrets in-place and stage changed files",
     )
     p.add_argument(
+        "--llm-triage",
+        metavar="FILE",
+        nargs="?",
+        const="auto",
+        help=(
+            "Run LLM triage pipeline on scan results. "
+            "Optional: path to existing scan JSON. "
+            "Set TIER1_PROVIDER / TIER2_PROVIDER env vars to configure models."
+        ),
+    )
+    p.add_argument(
         "--validate",
         action="store_true",
         help="Validate found secrets against live APIs (GitHub, HuggingFace, npm, PyPI)",
@@ -1055,6 +1066,26 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
                 f"Audit report written to {args.audit_report} (SHA-256: {audit_hash})",
                 file=sys.stderr,
             )
+
+    # ── --llm-triage: LLM-powered triage pipeline ──────────────────────────
+    if getattr(args, "llm_triage", None) is not None:
+        from omni_secret_scanner.llm.pipeline import run_llm_triage, LLMTriageConfig
+        import os as _os
+
+        json_input = None if args.llm_triage == "auto" else args.llm_triage
+        config = LLMTriageConfig(
+            json_input=json_input,
+            tier1_provider=_os.environ.get("TIER1_PROVIDER", "none"),
+            tier1_model=_os.environ.get("TIER1_MODEL", "gpt-4o-mini"),
+            tier1_endpoint=_os.environ.get("TIER1_ENDPOINT", "http://localhost:11434/api/generate"),
+            tier2_provider=_os.environ.get("TIER2_PROVIDER", "none"),
+            tier2_model=_os.environ.get("TIER2_MODEL", "claude-sonnet-4-20250514"),
+            output_file=getattr(args, "output", None),
+            quiet=args.quiet,
+            repo_dir=repo_dir,
+        )
+        run_llm_triage(config)
+        return 0
 
     return 1 if total_issues > 0 else 0
 
