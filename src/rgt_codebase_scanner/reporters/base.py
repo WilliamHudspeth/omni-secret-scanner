@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: MIT
 """Shared reporter utilities: deduplication, flattening, and scoring."""
 
+from typing import Any
 
-def deduplicate_findings(items: list[dict], key_fields: tuple) -> list[dict]:
+
+def deduplicate_findings(items: list[dict[str, Any]], key_fields: tuple[str, ...]) -> list[dict[str, Any]]:
     """Remove duplicate findings using *key_fields* as the composite key."""
-    seen: set = set()
-    unique: list[dict] = []
+    seen: set[tuple[str, ...]] = set()
+    unique: list[dict[str, Any]] = []
     for item in items:
         key = tuple(str(item.get(f, "")) for f in key_fields)
         if key not in seen:
@@ -14,7 +16,7 @@ def deduplicate_findings(items: list[dict], key_fields: tuple) -> list[dict]:
     return unique
 
 
-def injection_risk_score(hits: list[dict]) -> int:
+def injection_risk_score(hits: list[dict[str, Any]]) -> int:
     """Compute a 0–100 injection risk index from a list of injection findings."""
     weights = {
         "IGNORE_PREVIOUS": 10,
@@ -32,13 +34,13 @@ def injection_risk_score(hits: list[dict]) -> int:
 
 
 def flatten_findings(
-    history_findings: dict,
-    tree_findings: dict,
-    ps_findings: list,
-    semgrep_findings: list | None = None,
-) -> list[dict]:
+    history_findings: dict[str, Any],
+    tree_findings: dict[str, Any],
+    ps_findings: list[dict[str, Any]],
+    semgrep_findings: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Normalise all finding sources into a single flat list for TUI display."""
-    flat: list[dict] = []
+    flat: list[dict[str, Any]] = []
 
     for s in history_findings.get("secrets", []):
         flat.append(
@@ -123,10 +125,10 @@ def flatten_findings(
 
 
 def calculate_safety_score(
-    history_findings: dict,
-    tree_findings: dict,
-    ps_findings: list,
-    semgrep_findings: list | None = None,
+    history_findings: dict[str, Any],
+    tree_findings: dict[str, Any],
+    ps_findings: list[dict[str, Any]],
+    semgrep_findings: list[dict[str, Any]] | None = None,
 ) -> int:
     """Return a 0–100 safety score (100 = clean, 0 = severely compromised)."""
     if semgrep_findings is None:
