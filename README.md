@@ -149,6 +149,111 @@ docker run --rm -v $(pwd):/repo ghcr.io/williamhudspeth/rgt-codebase-scanner:lat
 
 ---
 
+## Architecture
+
+### Package Structure
+
+```
+src/rgt_codebase_scanner/
+├── cli.py               # CLI entry point, arg parser, main()
+├── patterns/            # Detection patterns
+│   ├── secrets.py       # 100+ API key/token regex patterns
+│   ├── pii.py           # SSN, email, phone, credit card
+│   ├── injection.py     # Prompt injection attack patterns
+│   ├── ai_keys.py       # LLM provider key patterns
+│   ├── lang_rules.py    # Language-specific heuristics
+│   └── combined.py      # Single-pass regex compilation
+├── detectors/           # Scan engines
+│   ├── file_tree.py     # Parallel working-tree scanner
+│   ├── git_history.py   # Deep commit history scanning
+│   ├── snippet.py       # Inline text/notebook/archive scanning
+│   ├── nlp.py           # spaCy NER + Presidio PII
+│   ├── ast_filter.py    # Tree-sitter context filter (19 langs)
+│   ├── taint.py         # Data flow to sensitive sinks
+│   ├── stego.py         # RS steganalysis (images)
+│   ├── perplexity.py    # Markov model anomaly detection
+│   ├── watchdog.py      # Continuous file monitoring
+│   ├── external.py      # Gitleaks/Trivy integration
+│   ├── semgrep.py       # Semgrep SAST integration
+│   ├── powershell.py    # PowerShell cross-check
+│   └── parallel.py      # Multi-process parallel scan
+├── llm/                 # LLM integration & state machine
+│   ├── state_machine.py # Finding state machine
+│   ├── profiler.py      # Repo profiling (--profile)
+│   ├── evidence.py      # Evidence collection (Stage 1)
+│   ├── scorer.py        # Risk pre-scoring (Stage 2)
+│   ├── router.py        # Deterministic engine router (Stage 3)
+│   ├── correlation.py   # Verification + asset correlation
+│   ├── pipeline.py      # End-to-end pipeline orchestrator
+│   ├── prompts.py       # CISSP-grade system prompts
+│   ├── tools.py         # Function-calling schema
+│   └── middleware.py     # JSON parser, grouper, noise filter
+├── reporters/           # Output renderers
+│   ├── base.py          # Dedup, scoring, flattening
+│   ├── html.py          # Self-contained dark-mode HTML
+│   └── audit.py         # Tamper-evident JSON reports
+├── utils/               # Shared utilities
+│   ├── entropy.py       # Shannon entropy
+│   ├── homoglyph.py     # Unicode confusable detection
+│   ├── decay.py         # Commit age decay weighting
+│   ├── cache.py         # SQLite file hash cache
+│   ├── mmap_io.py       # Memory-mapped file reading
+│   ├── fix.py           # Auto-redaction + git staging
+│   ├── validation.py    # Live API token validation
+│   └── redaction.py     # Secret masking/sanitizing
+├── config/              # Config loading
+├── tui/                 # Interactive terminal UI
+└── targets/             # Multi-target scanning
+```
+
+### Security Analysis Pipeline
+
+The pipeline is a deterministic state machine — the LLM is NOT a traffic cop. It's one sensor among many, used only for ambiguous findings.
+
+```
+DISCOVER → SCORE → ROUTE → ANALYZE → VERIFY → CORRELATE → REMEDIATE
+```
+
+| Stage | Module | Description |
+|---|---|---|
+| **0. Profile** | `llm/profiler.py` | Detect languages/frameworks, skip unnecessary engines (30-60% compute saved) |
+| **1. Evidence** | `llm/evidence.py` | Cheap signals only — regex, entropy, filename heuristics. No LLM, no AST. |
+| **2. Score** | `llm/scorer.py` | Rules-based 0-100 risk scoring with test file penalty |
+| **3. Route** | `llm/router.py` | Deterministic engine assignment by type + risk. Only ambiguous HIGH/CRITICAL escalate to LLM. |
+| **4. Analyze** | `detectors/` | Targeted deep scans: `--validate`, `--taint`, `--semgrep` on specific files |
+| **5. Verify** | `llm/correlation.py` | STS/API validation. Never let LLM declare CRITICAL — verification does. |
+| **6. Correlate** | `llm/correlation.py` | Group findings by asset: "production-aws has 4 findings" not "4 regexes matched" |
+
+```bash
+# Full pipeline (all stages, ~3s on 120-file repo)
+rgt-scan --pipeline
+
+# Profile only — see what engines to skip
+rgt-scan --profile
+```
+
+### The Control Plane
+
+The LLM integration is NOT a scanner-with-an-LLM tacked on. It's an evidence-routing control plane where the scanner is one sensor, and the orchestration layer is the moat.
+
+```text
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐
+│  rgt-scan   │    │  State       │    │  Remediation │
+│  (sensor)   │───▶│  Machine     │───▶│  ┌─ PR      │
+└─────────────┘    │  (router)    │    │  ├─ Vault   │
+                   │              │    │  ├─ Jira    │
+┌─────────────┐    │  ┌─────────┐ │    │  └─ Slack   │
+│ Semgrep     │───▶│  │ Router  │ │    └─────────────┘
+└─────────────┘    │  └─────────┘ │
+                   │  ┌─────────┐ │
+┌─────────────┐    │  │ LLM     │◀│─── Escalation only
+│ Gitleaks    │───▶│  │ (sensor)│ │    (ambiguous findings)
+└─────────────┘    │  └─────────┘ │
+                   └──────────────┘
+```
+
+---
+
 ## Integration Guide
 
 ### Local Development — Stop secrets before they leave your machine
@@ -314,7 +419,15 @@ rgt-scan --all-branches --validate --semgrep --parallel
 
 ## LLM Integration
 
----
+```bash
+# Print OpenAI/Anthropic function-calling schema
+rgt-scan --tool-schema
+
+# Self-test
+rgt-scan --self-test
+```
+
+See `llms.txt` at the repo root for plain-text LLM instructions.
 
 ## CLI Reference
 
