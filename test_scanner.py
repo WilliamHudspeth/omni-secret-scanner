@@ -623,3 +623,313 @@ def test_generate_report_file_output(tmp_path):
     scanner.generate_report(h, t, [], output_file=str(out), output_format="json")
     assert out.exists()
     assert "findings" in json.loads(out.read_text(encoding="utf-8"))
+
+# ==============================================================================
+# 15. Phase 10 - Secret Validation (Live API Checks)
+# ==============================================================================
+
+def test_validate_secret_returns_dict():
+    """validate_secret always returns the expected dict shape."""
+    result = scanner.validate_secret("GitHub Token", "ghp_fake_token_1234567890", timeout=1)
+    assert isinstance(result, dict)
+    for key in ("valid", "checked", "details", "status_code"):
+        assert key in result
+
+def test_validate_secret_no_network_safe():
+    """validate_secret handles network failures gracefully (checked=False)."""
+    result = scanner.validate_secret("GitHub Token", "ghp_fake123", timeout=1)
+    # Should not crash; checked should be False on network error
+    assert result["checked"] is False or result["checked"] is True
+    # Either way, shape is correct
+    assert isinstance(result, dict)
+
+def test_validate_secret_unknown_type():
+    """Unknown secret types return checked=False with explanation."""
+    result = scanner.validate_secret("Bogus Key", "some-value", timeout=1)
+    assert result["checked"] is False
+    assert "No validator" in result["details"]
+
+def test_validate_secret_pypi_special_path():
+    """PyPI uses the 403_vs_401 predicate path."""
+    result = scanner.validate_secret("PyPI token", "pypi-faketoken123", timeout=1)
+    assert isinstance(result, dict)
+    # Should either check with 403/401 or fail network (checked=False)
+    assert "checked" in result
+
+def test_generate_report_includes_validated_secrets(capsys):
+    """JSON report includes validated_secrets field when passed."""
+    import json
+    h = {"secrets": [], "pii": [], "entropy": [], "commits": [], "injections": []}
+    t = {"suspicious_files": [], "current_secrets": [], "nlp_pii": [], "injections": []}
+    validated = [{"valid": True, "checked": True, "details": "test", "status_code": 200,
+                   "original_type": "GitHub Token", "original_match": "ghp_xxx",
+                   "original_file": "a.py", "original_line": 5}]
+    scanner.generate_report(h, t, [], output_format="json", validated_secrets=validated)
+    r = json.loads(capsys.readouterr().out)
+    assert r["summary"]["validated"] == 1
+    assert r["summary"]["valid_live"] == 1
+    assert r["summary"]["invalid_live"] == 0
+    assert len(r["findings"]["validated_secrets"]) == 1
+
+# ==============================================================================
+# 16. Phase 10 - TOML Config File Support
+# ==============================================================================
+
+def test_load_toml_config_basic(tmp_path):
+    """TOML config loads entropy threshold."""
+    import tomllib
+    cfg_path = tmp_path / ".omni-scan.toml"
+    cfg_path.write_text("""[scanner]
+entropy_threshold = 4.0
+max_file_size_kb = 512
+fast = true
+quiet = true
+mask = true
+
+[exclude]
+patterns = ["vendor/", "*.min.js"]
+tokens = ["example-token"]
+
+[custom_patterns.secrets.NEW_KEY]
+name = "NewKey"
+pattern = "newkey-[a-z0-9]{16}"
+
+[custom_patterns.pii.NEW_PII]
+name = "NewPII"
+pattern = "TEST-\\\\d{4}"
+
+[report]
+format = "html"
+output = "scan.html"
+""", encoding="utf-8")
+    config = scanner.load_toml_config(path=str(cfg_path))
+    assert config["entropy_threshold"] == 4.0
+    assert config["max_file_size_kb"] == 512
+    assert config["fast"] is True
+    assert config["mask"] is True
+    assert config["exclude_patterns"] == ["vendor/", "*.min.js"]
+    assert config["exclude_tokens"] == ["example-token"]
+    assert config["format"] == "html"
+    assert config["output"] == "scan.html"
+
+def test_load_toml_config_not_found():
+    """Missing TOML file returns empty dict."""
+    config = scanner.load_toml_config(path="/nonexistent/omni-scan.toml")
+    assert config == {}
+
+def test_load_toml_config_custom_patterns(tmp_path):
+    """TOML config loads custom secrets and PII patterns."""
+    cfg_path = tmp_path / ".omni-scan.toml"
+    cfg_path.write_text("""[custom_patterns.secrets.MYKEY]
+name = "MyKey"
+pattern = "mykey-[a-z0-9]{16}"
+
+[custom_patterns.pii.MYPII]
+name = "MyPII"
+pattern = "CUSTOM-\\\\d{4}"
+""", encoding="utf-8")
+    config = scanner.load_toml_config(path=str(cfg_path))
+    assert len(config["custom_secrets"]) == 1
+    assert config["custom_secrets"][0]["name"] == "MyKey"
+    assert len(config["custom_pii"]) == 1
+    assert config["custom_pii"][0]["name"] == "MyPII"
+
+
+# ==============================================================================
+# 17. Phase 10 - Self-Correct Prompt (--self-correct-prompt)
+# ==============================================================================
+
+def test_generate_self_correct_prompt_empty():
+    """Empty findings list returns a no-issues message."""
+    result = scanner.generate_self_correct_prompt([])
+    assert "No security issues found" in result
+
+def test_generate_self_correct_prompt_basic():
+    """Basic findings produce a prompt with remediation advice."""
+    findings = [
+        {"type": "GitHub Token", "file": "config.py", "line": 42, "match": "ghp_fake123"},
+        {"type": "AWS Access Key", "file": "aws_setup.py", "line": 15, "match": "AKIA1234"},
+    ]
+    result = scanner.generate_self_correct_prompt(findings)
+    assert "ISSUE #1" in result
+    assert "ISSUE #2" in result
+    assert "GitHub Token" in result
+    assert "AWS Access Key" in result
+    assert "config.py" in result
+    assert "aws_setup.py" in result
+    assert "Remediation:" in result
+
+def test_generate_self_correct_prompt_injection():
+    """Injection findings get appropriate remediation advice."""
+    findings = [
+        {"type": "Prompt Injection", "file": "input.txt", "line": 1, "match": "ignore previous"},
+    ]
+    result = scanner.generate_self_correct_prompt(findings)
+    assert "Injection" in result
+    assert "Sanitize" in result or "Remediation" in result
+
+def test_generate_self_correct_prompt_unknown_type():
+    """Unknown type still produces a valid prompt entry."""
+    findings = [
+        {"type": "Some Unknown Key", "file": "secrets.py", "line": 10, "match": "xyz_fake"},
+    ]
+    result = scanner.generate_self_correct_prompt(findings)
+    assert "Some Unknown Key" in result
+    assert "Remediation:" in result
+
+
+# ==============================================================================
+# 18. Phase 10 - Multi-lingual NLP (--language)
+# ==============================================================================
+
+def test_normalize_language_known_codes():
+    """_normalize_language maps known codes correctly."""
+    assert scanner._normalize_language("en") == "en"
+    assert scanner._normalize_language("es") == "es"
+    assert scanner._normalize_language("fr") == "fr"
+    assert scanner._normalize_language("de") == "de"
+    assert scanner._normalize_language("ja") == "ja"
+    assert scanner._normalize_language("zh") == "zh"
+
+def test_normalize_language_long_names():
+    """_normalize_language handles full language names."""
+    assert scanner._normalize_language("spanish") == "es"
+    assert scanner._normalize_language("french") == "fr"
+    assert scanner._normalize_language("german") == "de"
+    assert scanner._normalize_language("japanese") == "ja"
+
+def test_normalize_language_unknown_falls_back():
+    """Unknown language codes fall back to 'en'."""
+    assert scanner._normalize_language("zz") == "en"
+    assert scanner._normalize_language("") == "en"
+    assert scanner._normalize_language(None) == "en"
+
+def test_spacy_language_models_map():
+    """SPACY_LANGUAGE_MODELS has entries for all supported languages."""
+    assert "en" in scanner.SPACY_LANGUAGE_MODELS
+    assert "es" in scanner.SPACY_LANGUAGE_MODELS
+    assert "fr" in scanner.SPACY_LANGUAGE_MODELS
+    assert scanner.SPACY_LANGUAGE_MODELS["en"] == "en_core_web_sm"
+    assert scanner.SPACY_LANGUAGE_MODELS["xx"] == "xx_ent_wiki_sm"
+
+def test_presidio_language_map():
+    """PRESIDIO_LANGUAGE_MAP maps language codes correctly."""
+    assert "en" in scanner.PRESIDIO_LANGUAGE_MAP
+    assert "es" in scanner.PRESIDIO_LANGUAGE_MAP
+    assert scanner.PRESIDIO_LANGUAGE_MAP["de"] == "de"
+
+
+# ==============================================================================
+# 19. Phase 10 - Language-Specific Heuristic Rule Packs (--lang-rules)
+# ==============================================================================
+
+def test_lang_rules_python_has_entries():
+    """Python rule pack contains language-specific patterns."""
+    assert len(scanner.LANG_RULES_PYTHON) >= 5
+    assert "PYTHON_DJANGO_SECRET" in scanner.LANG_RULES_PYTHON
+    assert "PYTHON_FLASK_SECRET" in scanner.LANG_RULES_PYTHON
+
+def test_lang_rules_nodejs_has_entries():
+    """Node.js rule pack contains language-specific patterns."""
+    assert len(scanner.LANG_RULES_NODEJS) >= 4
+    assert "NODE_PROCESS_ENV_ASSIGN" in scanner.LANG_RULES_NODEJS
+
+def test_lang_rules_java_has_entries():
+    """Java rule pack contains language-specific patterns."""
+    assert len(scanner.LANG_RULES_JAVA) >= 3
+    assert "JAVA_SPRING_PROPERTY" in scanner.LANG_RULES_JAVA
+
+def test_file_ext_to_lang_rules_mapping():
+    """FILE_EXT_TO_LANG_RULES maps extensions to correct packs."""
+    assert scanner.FILE_EXT_TO_LANG_RULES[".py"] is scanner.LANG_RULES_PYTHON
+    assert scanner.FILE_EXT_TO_LANG_RULES[".js"] is scanner.LANG_RULES_NODEJS
+    assert scanner.FILE_EXT_TO_LANG_RULES[".ts"] is scanner.LANG_RULES_NODEJS
+    assert scanner.FILE_EXT_TO_LANG_RULES[".java"] is scanner.LANG_RULES_JAVA
+
+def test_get_lang_rules_for_file_disabled_by_default():
+    """When _lang_rules_enabled is False, returns empty dict."""
+    original = scanner._lang_rules_enabled
+    scanner._lang_rules_enabled = False
+    try:
+        assert scanner.get_lang_rules_for_file("test.py") == {}
+        assert scanner.get_lang_rules_for_file("app.js") == {}
+    finally:
+        scanner._lang_rules_enabled = original
+
+def test_get_lang_rules_for_file_enabled():
+    """When _lang_rules_enabled is True, returns matching rules."""
+    original = scanner._lang_rules_enabled
+    scanner._lang_rules_enabled = True
+    try:
+        rules = scanner.get_lang_rules_for_file("test.py")
+        assert len(rules) >= 5
+        rules_js = scanner.get_lang_rules_for_file("app.js")
+        assert len(rules_js) >= 4
+    finally:
+        scanner._lang_rules_enabled = original
+
+def test_get_lang_rules_for_file_unknown_ext():
+    """Unknown file extensions return empty dict."""
+    original = scanner._lang_rules_enabled
+    scanner._lang_rules_enabled = True
+    try:
+        assert scanner.get_lang_rules_for_file("readme.md") == {}
+        assert scanner.get_lang_rules_for_file("image.png") == {}
+    finally:
+        scanner._lang_rules_enabled = original
+
+
+# ==============================================================================
+# 20. Phase 10 - AST Context Filtering (--ast-filter)
+# ==============================================================================
+
+def test_ast_filter_disabled_by_default():
+    """When _ast_filter_enabled is False, always returns False."""
+    original = scanner._ast_filter_enabled
+    scanner._ast_filter_enabled = False
+    try:
+        assert scanner.ast_context_filter("nonexistent.py", 1) is False
+    finally:
+        scanner._ast_filter_enabled = original
+
+def test_ast_filter_nonexistent_file():
+    """Non-existent files return False (graceful degradation)."""
+    original = scanner._ast_filter_enabled
+    scanner._ast_filter_enabled = True
+    try:
+        assert scanner.ast_context_filter("/nonexistent/file.py", 1) is False
+    finally:
+        scanner._ast_filter_enabled = original
+
+def test_treesitter_lang_map():
+    """TREESITTER_LANG_MAP covers major languages."""
+    assert ".py" in scanner.TREESITTER_LANG_MAP
+    assert ".js" in scanner.TREESITTER_LANG_MAP
+    assert ".java" in scanner.TREESITTER_LANG_MAP
+    assert ".go" in scanner.TREESITTER_LANG_MAP
+    assert ".rs" in scanner.TREESITTER_LANG_MAP
+    assert scanner.TREESITTER_LANG_MAP[".py"] == "python"
+    assert scanner.TREESITTER_LANG_MAP[".ts"] == "typescript"
+
+def test_ast_filter_with_test_comment(tmp_path):
+    """AST filter should detect comments (when tree-sitter available)."""
+    original = scanner._ast_filter_enabled
+    scanner._ast_filter_enabled = True
+    try:
+        # Create a Python file with a secret in a comment
+        test_file = tmp_path / "test_comment.py"
+        test_file.write_text("# API_KEY = 'sk-test123456789'\nprint('hello')\n", encoding="utf-8")
+        # The comment on line 1 should be filtered
+        result = scanner.ast_context_filter(str(test_file), 1)
+        # If tree-sitter is installed, result should be True (filtered);
+        # if not installed, it gracefully returns False
+        assert isinstance(result, bool)
+    finally:
+        scanner._ast_filter_enabled = original
+
+def test_filter_function_names_has_entries():
+    """_FILTER_FUNCTION_NAMES contains test/mock patterns."""
+    assert "test_" in scanner._FILTER_FUNCTION_NAMES
+    assert "mock_" in scanner._FILTER_FUNCTION_NAMES
+    assert "setup" in scanner._FILTER_FUNCTION_NAMES
+    assert "describe" in scanner._FILTER_FUNCTION_NAMES

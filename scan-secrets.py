@@ -78,6 +78,245 @@ CUSTOM_SECRET_PATTERNS = {
     "CASE_CLASS_SECRET": r"(?i)(?:case\s+class|data\s+class)\s+\w+\([^)]*?(?:password|secret|key|token)\s*:\s*\"[^\"]+\"",
 }
 
+# ------------------------------------------------------------------------------
+# Language-Specific Heuristic Rule Packs (Phase 10 — --lang-rules)
+# ------------------------------------------------------------------------------
+# These patterns catch hardcoded secrets in language-specific idioms that
+# generic regex would miss. Activated via --lang-rules flag or .omni-scan.toml.
+
+LANG_RULES_PYTHON = {
+    "PYTHON_HARDCODED_OS_ENVIRON": r'os\.environ\[[\'"]\w+[\'"]\]\s*=\s*[\'"]([^\'"]{6,})[\'"]',
+    "PYTHON_DOTENV_ASSIGNMENT": r'(?:load_dotenv|dotenv_values)\s*\(\s*[\'"][^\'"]+[\'"]\s*\)\s*#',
+    "PYTHON_FLASK_SECRET": r'app\.config\[[\'"]SECRET_KEY[\'"]\]\s*=\s*[\'"]([^\'"]{6,})[\'"]',
+    "PYTHON_DJANGO_SECRET": r'SECRET_KEY\s*=\s*[\'"]([^\'"]{10,})[\'"]',
+    "PYTHON_REQUESTS_AUTH_HEADER": r'headers\s*=\s*\{[^}]*[\'"]Authorization[\'"][^}]*[\'"]([^\'"]{10,})[\'"]',
+    "PYTHON_LOGGING_CREDENTIALS": r'log(?:ging|ger)\.(?:info|debug|warning)\(\s*[\'"].*?(?:password|token|secret|key).*?[\'"]\s*[,%]',
+    "PYTHON_HARDCODED_DB_URL": r'(?:DATABASE_URL|DB_URL)\s*=\s*[\'"]([a-z]+://[^@]+:[^@]+@[^\'"]+)[\'"]',
+}
+
+LANG_RULES_NODEJS = {
+    "NODE_PROCESS_ENV_ASSIGN": r'process\.env\.\w+\s*=\s*[\'"]([^\'"]{6,})[\'"]',
+    "NODE_DOTENV_REQUIRE": r'require\([\'"]dotenv[\'"]\)\.config\(\s*\{[^}]*path:\s*[\'"]([^\'"]+)[\'"]',
+    "NODE_EXPRESS_SESSION_SECRET": r'app\.use\(session\(\s*\{[^}]*secret:\s*[\'"]([^\'"]{6,})[\'"]',
+    "NODE_AXIOS_AUTH_HEADER": r'(?:axios|fetch)\([^)]*headers:\s*\{[^}]*[\'"]Authorization[\'"]\s*:\s*[\'"](\S{10,})[\'"]',
+    "NODE_CONFIG_JSON_SECRET": r'config\.get\([\'"](?:secret|password|token|key)[\'"]\)',
+    "NODE_ENV_FILE_COMMENTED_CRED": r'#.*\.env.*(?:secret|password|token|key)\s*=\s*\S{6,}',
+}
+
+LANG_RULES_JAVA = {
+    "JAVA_SPRING_PROPERTY": r'(?:spring\.datasource\.password|spring\.security\.oauth2\.client-secret)\s*=\s*(\S{6,})',
+    "JAVA_PROPERTIES_CREDENTIAL": r'(?:password|api[._-]?key|secret[._-]?key|token)\s*=\s*(\S{6,})',
+    "JAVA_YAML_CREDENTIAL": r'(?:password|api-key|secret-key|token)\s*:\s*(\S{6,})',
+    "JAVA_SYSTEM_GETENV_HARDCODED": r'System\.getenv\([\'"][A-Z_]+[\'"]\)\s*;\s*//\s*fallback',
+    "JAVA_STRING_LITERAL_SECRET": r'String\s+\w*(?:secret|password|token|key)\w*\s*=\s*"([^"]{8,})"',
+}
+
+# Maps file extension to language rule pack
+FILE_EXT_TO_LANG_RULES = {
+    ".py": LANG_RULES_PYTHON,
+    ".pyi": LANG_RULES_PYTHON,
+    ".pyx": LANG_RULES_PYTHON,
+    ".js": LANG_RULES_NODEJS,
+    ".mjs": LANG_RULES_NODEJS,
+    ".cjs": LANG_RULES_NODEJS,
+    ".ts": LANG_RULES_NODEJS,
+    ".tsx": LANG_RULES_NODEJS,
+    ".jsx": LANG_RULES_NODEJS,
+    ".java": LANG_RULES_JAVA,
+    ".properties": LANG_RULES_JAVA,
+    ".yml": LANG_RULES_JAVA,
+    ".yaml": LANG_RULES_JAVA,
+}
+
+
+def get_lang_rules_for_file(filepath: str) -> dict:
+    """Return language-specific heuristic patterns for a given file path.
+
+    Returns an empty dict if --lang-rules is not active or no rules match.
+    Callers should merge these into all_secret_patterns.
+    """
+    if not _lang_rules_enabled:
+        return {}
+    import os as _os
+    ext = _os.path.splitext(filepath)[1].lower()
+    return FILE_EXT_TO_LANG_RULES.get(ext, {})
+
+
+# Module-level toggle for lang rules (set by main() via --lang-rules)
+_lang_rules_enabled = False
+
+# Module-level toggle for AST filtering (set by main() via --ast-filter)
+_ast_filter_enabled = False
+
+# ------------------------------------------------------------------------------
+# Tree-sitter AST Context Filtering (Phase 10 — --ast-filter)
+# ------------------------------------------------------------------------------
+# Uses tree-sitter to parse code and filter out false positives by understanding
+# whether a match occurred inside a test function, mock object, or comment block.
+
+# File extension → tree-sitter language name
+TREESITTER_LANG_MAP = {
+    ".py": "python",
+    ".js": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".jsx": "javascript",
+    ".java": "java",
+    ".go": "go",
+    ".rs": "rust",
+    ".cpp": "cpp",
+    ".c": "c",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".rb": "ruby",
+    ".cs": "c_sharp",
+    ".php": "php",
+    ".swift": "swift",
+    ".kt": "kotlin",
+}
+
+# AST node types that indicate a "safe" context (test, mock, comment)
+_FILTER_NODE_TYPES = {"comment", "block_comment", "line_comment"}
+_FILTER_FUNCTION_NAMES = {
+    # Functions/methods that suggest test or mock context
+    "test_", "mock_", "fake_", "stub_", "dummy_",
+    "setup", "teardown", "setUp", "tearDown",
+    "beforeEach", "afterEach", "beforeAll", "afterAll",
+    "describe", "it(", "spec_", "example_",
+}
+
+_treesitter_cache: dict = {}  # {language_name: (parser, language)}
+
+
+def _init_treesitter():
+    """Lazy-load tree-sitter. Returns True if available."""
+    if _treesitter_cache.get("_checked"):
+        return _treesitter_cache.get("_available", False)
+    _treesitter_cache["_checked"] = True
+    try:
+        import tree_sitter
+        _treesitter_cache["_available"] = True
+        return True
+    except ImportError:
+        _treesitter_cache["_available"] = False
+        return False
+
+
+def _get_treesitter_parser(filepath: str):
+    """Get or create a tree-sitter parser for the given file's language.
+
+    Returns (parser, language_obj) or (None, None) on failure.
+    """
+    if not _init_treesitter():
+        return None, None
+
+    ext = os.path.splitext(filepath)[1].lower()
+    lang_name = TREESITTER_LANG_MAP.get(ext)
+    if not lang_name:
+        return None, None
+
+    if lang_name in _treesitter_cache:
+        return _treesitter_cache[lang_name]
+
+    try:
+        import tree_sitter
+        # tree-sitter-language-pack or individual language packages
+        lang_pkg = None
+        for pkg_name in (f"tree_sitter_{lang_name}", f"tree-sitter-{lang_name}"):
+            try:
+                lang_pkg = __import__(pkg_name.replace("-", "_"), fromlist=["language"])
+                break
+            except ImportError:
+                continue
+
+        if lang_pkg is None:
+            return None, None
+
+        language = tree_sitter.Language(lang_pkg.language())
+        parser = tree_sitter.Parser()
+        parser.set_language(language)
+        _treesitter_cache[lang_name] = (parser, language)
+        return parser, language
+    except Exception:
+        return None, None
+
+
+def ast_context_filter(filepath: str, line_number: int) -> bool:
+    """Check if a match at line_number is in a safe context (test, mock, comment).
+
+    Returns True if the match SHOULD be filtered out (false positive).
+    Returns False if the match should be kept.
+    Gracefully returns False on any error (e.g., tree-sitter not installed).
+    """
+    if not _ast_filter_enabled:
+        return False
+
+    parser, language = _get_treesitter_parser(filepath)
+    if parser is None:
+        return False
+
+    # Read and parse the file
+    try:
+        file_path = Path(filepath)
+        if not file_path.exists():
+            return False
+        source = file_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return False
+
+    try:
+        tree = parser.parse(source.encode("utf-8"))
+    except Exception:
+        return False
+
+    # Find the node at the target line
+    target_line_bytes = line_number
+    lines = source.split("\n")
+    if target_line_bytes < 1 or target_line_bytes > len(lines):
+        return False
+
+    # Calculate byte offset for the start of the target line
+    byte_offset = 0
+    for i in range(target_line_bytes - 1):
+        byte_offset += len(lines[i].encode("utf-8")) + 1  # +1 for newline
+
+    node = tree.root_node.descendant_for_byte_range(byte_offset, byte_offset + 1)
+    if node is None:
+        return False
+
+    # Walk up the AST from the matched node to the root
+    current = node
+    while current is not None:
+        # Check if current node is a comment
+        if current.type in _FILTER_NODE_TYPES:
+            return True
+
+        # Check if current node is a function definition with test/mock name
+        if current.type in ("function_definition", "method_definition", "function_declaration",
+                            "arrow_function", "function"):
+            name_node = current.child_by_field_name("name")
+            if name_node:
+                func_name = source[name_node.start_byte:name_node.end_byte]
+                for pattern in _FILTER_FUNCTION_NAMES:
+                    if pattern in func_name:
+                        return True
+
+        # Check if we're inside a class with test/mock name
+        if current.type in ("class_definition", "class_declaration"):
+            name_node = current.child_by_field_name("name")
+            if name_node:
+                class_name = source[name_node.start_byte:name_node.end_byte]
+                for pattern in _FILTER_FUNCTION_NAMES:
+                    if pattern in class_name:
+                        return True
+
+        current = current.parent
+
+    return False
+
+
 CUSTOM_PII_PATTERNS = {
     "Email Address": r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
     "Phone Number (US)": r"\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}",
@@ -264,6 +503,176 @@ def load_external_patterns(path: str, quiet: bool = False) -> tuple:
     if not quiet:
         print(f"Loaded {len(extra_secrets)} secret patterns and {len(extra_pii)} PII patterns from {path}", file=sys.stderr)
     return extra_secrets, extra_pii
+
+# ------------------------------------------------------------------------------
+# Secret Validation – Live API checks (--validate flag)
+# ------------------------------------------------------------------------------
+
+SECRET_VALIDATORS = {
+    # (endpoint, method, auth_header_prefix, expected_status, success_predicate)
+    "GitHub Token":        ("https://api.github.com/user", "GET", "token", 200, None),
+    "GitHub Fine-grained": ("https://api.github.com/user", "GET", "Bearer", 200, None),
+    "HuggingFace":         ("https://huggingface.co/api/whoami", "GET", "Bearer", 200, None),
+    "npm token":           ("https://registry.npmjs.org/-/whoami", "GET", "Bearer", 200, None),
+    "PyPI token":          ("https://pypi.org/pypi", "POST", None, None, "403_vs_401"),
+}
+
+def validate_secret(secret_type: str, value: str, timeout: int = 5) -> dict:
+    """Optionally call live APIs to check if a found secret is valid/active.
+
+    Returns {"valid": bool, "checked": bool, "details": str, "status_code": int | None}
+    Gracefully returns checked=False on network errors, missing deps, or timeouts.
+    """
+    result = {"valid": False, "checked": False, "details": "", "status_code": None}
+
+    # Find the best validator based on secret type
+    validator = None
+    for key, v in SECRET_VALIDATORS.items():
+        if key.lower() in secret_type.lower():
+            validator = v
+            break
+    if validator is None:
+        result["details"] = "No validator available for this secret type"
+        return result
+
+    endpoint, method, auth_prefix, expected_status, predicate = validator
+
+    # Build auth header
+    headers = {"User-Agent": "omni-secret-scanner/9.0.0"}
+    if auth_prefix:
+        headers["Authorization"] = f"{auth_prefix} {value}"
+
+    # PyPI uses a special heuristic: POST expects 403 for missing permissions, 401 for invalid
+    if predicate == "403_vs_401":
+        try:
+            import urllib.request
+            import urllib.error
+            req = urllib.request.Request(endpoint, method=method or "POST", headers=headers)
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            result["status_code"] = resp.getcode()
+            result["checked"] = True
+            result["valid"] = False  # 200 means token has PyPI access
+            result["details"] = f"PyPI token granted access (status {resp.getcode()})"
+            return result
+        except urllib.error.HTTPError as e:
+            result["status_code"] = e.code
+            result["checked"] = True
+            if e.code == 403:
+                result["valid"] = True
+                result["details"] = "PyPI token valid (received 403 Forbidden — token has account but no package perms)"
+            elif e.code == 401:
+                result["valid"] = False
+                result["details"] = "PyPI token invalid/expired (received 401 Unauthorized)"
+            else:
+                result["details"] = f"PyPI unexpected status {e.code}"
+            return result
+        except Exception as e:
+            result["details"] = f"Network error: {str(e)[:120]}"
+            return result
+
+    # Standard validation: success is expected_status
+    try:
+        import urllib.request
+        import urllib.error
+        req = urllib.request.Request(endpoint, method=method, headers=headers)
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        result["status_code"] = resp.getcode()
+        result["checked"] = True
+        result["valid"] = (resp.getcode() == expected_status)
+        result["details"] = f"API returned {resp.getcode()} (expected {expected_status})"
+    except urllib.error.HTTPError as e:
+        result["status_code"] = e.code
+        result["checked"] = True
+        result["valid"] = False
+        result["details"] = f"API returned {e.code} (expected {expected_status})"
+    except Exception as e:
+        result["details"] = f"Network error: {str(e)[:120]}"
+
+    return result
+
+
+# ------------------------------------------------------------------------------
+# TOML Config File Support (--config / .omni-scan.toml auto-detect)
+# ------------------------------------------------------------------------------
+
+def load_toml_config(path: str = None, repo_dir: str = None) -> dict:
+    """Load scanner configuration from a TOML file.
+
+    Auto-detects .omni-scan.toml in repo_dir if no explicit path.
+    Returns a dict with config keys that CLI flags can override.
+    Gracefully degrades if no TOML library is available (returns empty dict).
+    """
+    config = {}
+
+    # Resolve path
+    if path:
+        toml_path = Path(path)
+    elif repo_dir:
+        toml_path = Path(repo_dir) / ".omni-scan.toml"
+    else:
+        toml_path = Path(".omni-scan.toml")
+
+    if not toml_path.exists():
+        return config
+
+    # Try TOML libraries in order: tomllib (3.11+), tomli (backport), toml (legacy)
+    toml_data = None
+    for lib_name in ("tomllib", "tomli", "toml"):
+        try:
+            mod = __import__(lib_name)
+            if lib_name == "tomllib":
+                toml_data = mod.loads(toml_path.read_text(encoding="utf-8"))
+            elif lib_name == "tomli":
+                toml_data = mod.loads(toml_path.read_text(encoding="utf-8"))
+            else:
+                toml_data = mod.load(toml_path.read_text(encoding="utf-8"))
+            break
+        except (ImportError, AttributeError):
+            continue
+        except Exception:
+            continue
+
+    if toml_data is None:
+        return config
+
+    # Extract scanner section
+    scanner_cfg = toml_data.get("scanner", {})
+    if scanner_cfg:
+        for key in ("entropy_threshold", "max_file_size_kb", "fast", "quiet",
+                     "mask", "sanitize", "validate", "all_branches", "progress",
+                     "context_lines"):
+            if key in scanner_cfg:
+                config[key] = scanner_cfg[key]
+
+    # Extract exclude section
+    exclude_cfg = toml_data.get("exclude", {})
+    if exclude_cfg:
+        if "patterns" in exclude_cfg:
+            config["exclude_patterns"] = exclude_cfg["patterns"]
+        if "tokens" in exclude_cfg:
+            config["exclude_tokens"] = exclude_cfg["tokens"]
+
+    # Extract custom_patterns section
+    custom_cfg = toml_data.get("custom_patterns", {})
+    if custom_cfg:
+        config["custom_secrets"] = custom_cfg.get("secrets", [])
+        config["custom_pii"] = custom_cfg.get("pii", [])
+        # Handle nested-table syntax: convert dict values to list
+        if isinstance(config["custom_secrets"], dict):
+            config["custom_secrets"] = list(config["custom_secrets"].values())
+        if isinstance(config["custom_pii"], dict):
+            config["custom_pii"] = list(config["custom_pii"].values())
+
+    # Extract report section
+    report_cfg = toml_data.get("report", {})
+    if report_cfg:
+        if "format" in report_cfg:
+            config["format"] = report_cfg["format"]
+        if "output" in report_cfg:
+            config["output"] = report_cfg["output"]
+
+    return config
+
 
 def get_submodules(repo_dir: str) -> list:
     import subprocess
@@ -468,7 +877,7 @@ def scan_snippet(content: str, source_name: str, entropy_threshold=3.8, ignore_t
                 
     if presidio_analyzer:
         try:
-            results = presidio_analyzer.analyze(text=content, language="en")
+            results = presidio_analyzer.analyze(text=content, language=getattr(presidio_analyzer, '_omni_language', 'en'))
             for res in results:
                 val = content[res.start:res.end]
                 if val not in ignore_tokens:
@@ -1052,7 +1461,58 @@ def redact_file_in_place(filepath: str, sensitive_words=None, dryrun=False) -> b
         print(f"Error redacting file {filepath}: {e}", file=sys.stderr)
         return False
 
-def init_nlp_deidentifier(quiet=False):
+# ------------------------------------------------------------------------------
+# Multi-lingual NLP model mapping (--language flag)
+# ------------------------------------------------------------------------------
+
+SPACY_LANGUAGE_MODELS = {
+    "en": "en_core_web_sm",
+    "es": "es_core_news_sm",
+    "fr": "fr_core_news_sm",
+    "de": "de_core_news_sm",
+    "pt": "pt_core_news_sm",
+    "it": "it_core_news_sm",
+    "nl": "nl_core_news_sm",
+    "el": "el_core_news_sm",
+    "ja": "ja_core_news_sm",
+    "zh": "zh_core_web_sm",
+    "ru": "ru_core_news_sm",
+    "ko": "ko_core_news_sm",
+    "xx": "xx_ent_wiki_sm",  # multi-language fallback
+}
+
+PRESIDIO_LANGUAGE_MAP = {
+    "en": "en", "es": "es", "fr": "fr", "de": "de",
+    "pt": "pt", "it": "it", "nl": "nl", "ja": "ja",
+    "zh": "zh", "ru": "ru", "ko": "ko", "ar": "ar",
+}
+
+def _normalize_language(lang: str) -> str:
+    """Normalize a language code to a known 2-letter code, defaulting to 'en'."""
+    if not lang:
+        return "en"
+    lang = lang.lower().strip()
+    # Handle common longer codes
+    if lang in ("english",): return "en"
+    if lang in ("spanish", "español"): return "es"
+    if lang in ("french", "français"): return "fr"
+    if lang in ("german", "deutsch"): return "de"
+    if lang in ("portuguese", "português"): return "pt"
+    if lang in ("italian", "italiano"): return "it"
+    if lang in ("dutch", "nederlands"): return "nl"
+    if lang in ("japanese", "日本語"): return "ja"
+    if lang in ("chinese", "中文"): return "zh"
+    if lang in ("russian", "русский"): return "ru"
+    if lang in ("korean", "한국어"): return "ko"
+    if lang in ("arabic", "العربية"): return "ar"
+    if lang in ("greek", "ελληνικά"): return "el"
+    # Accept 2-letter codes directly
+    if len(lang) == 2 and lang in SPACY_LANGUAGE_MODELS:
+        return lang
+    return "en"
+
+
+def init_nlp_deidentifier(language="en", quiet=False):
     try:
         from deidentification import Deidentification, DeidentificationConfig
     except ImportError:
@@ -1060,21 +1520,29 @@ def init_nlp_deidentifier(quiet=False):
             print("Warning: The 'text-deidentification' package is not installed. NLP scanning will be skipped.", file=sys.stderr)
             print("Please install it by running: pip install text-deidentification", file=sys.stderr)
         return None
-        
+
+    lang_norm = _normalize_language(language)
+    spacy_model = SPACY_LANGUAGE_MODELS.get(lang_norm, "en_core_web_sm")
     try:
-        config = DeidentificationConfig(spacy_model='en_core_web_sm', save_tokens=True, excluded_entities=set())
+        config = DeidentificationConfig(spacy_model=spacy_model, save_tokens=True, excluded_entities=set())
         deidentifier = Deidentification(config)
         return deidentifier
     except Exception as e:
         if not quiet:
-            print(f"Warning: Error loading NLP model ({e}). NLP scanning will be skipped.", file=sys.stderr)
-            print("Please ensure the spaCy model is downloaded: python -m spacy download en_core_web_sm", file=sys.stderr)
+            print(f"Warning: Error loading NLP model '{spacy_model}' for language '{lang_norm}' ({e}). NLP scanning will be skipped.", file=sys.stderr)
+            if lang_norm != "en":
+                print(f"Please ensure the spaCy model is downloaded: python -m spacy download {spacy_model}", file=sys.stderr)
+            else:
+                print("Please ensure the spaCy model is downloaded: python -m spacy download en_core_web_sm", file=sys.stderr)
         return None
 
-def init_presidio_analyzer(quiet=False):
+def init_presidio_analyzer(language="en", quiet=False):
     try:
         from presidio_analyzer import AnalyzerEngine
+        lang_norm = _normalize_language(language)
+        presidio_lang = PRESIDIO_LANGUAGE_MAP.get(lang_norm, "en")
         analyzer = AnalyzerEngine()
+        analyzer._omni_language = presidio_lang  # attach language for downstream use
         return analyzer
     except ImportError:
         if not quiet:
@@ -1219,6 +1687,11 @@ def _scan_single_file(job: tuple) -> dict:
     (path, file_rel_path, max_bytes, all_secret_patterns, ignore_tokens,
      sensitive_words, extract_code_blocks, nlp_deidentifier, presidio_analyzer) = job
 
+    # Merge language-specific heuristic rules if --lang-rules is active
+    lang_rules = get_lang_rules_for_file(file_rel_path)
+    if lang_rules:
+        all_secret_patterns = {**all_secret_patterns, **lang_rules}
+
     result = {
         "suspicious_files": [],
         "current_secrets": [],
@@ -1352,7 +1825,7 @@ def _scan_single_file(job: tuple) -> dict:
     # Presidio NLP PII scanning
     if presidio_analyzer and path.suffix in ['.txt', '.md', '.csv', '.json', '.yml', '.yaml', '.py', '.tf', 'Dockerfile']:
         try:
-            results = presidio_analyzer.analyze(text=content, language="en")
+            results = presidio_analyzer.analyze(text=content, language=getattr(presidio_analyzer, '_omni_language', 'en'))
             for res in results:
                 val = content[res.start:res.end]
                 if val not in ignore_tokens:
@@ -1364,6 +1837,16 @@ def _scan_single_file(job: tuple) -> dict:
                     })
         except Exception:
             pass
+
+    # AST context filter: remove false positives in test/mock/comment contexts
+    if _ast_filter_enabled and result["current_secrets"]:
+        filtered = []
+        for finding in result["current_secrets"]:
+            line_no = finding.get("line", 0)
+            if line_no and ast_context_filter(str(path), line_no):
+                continue
+            filtered.append(finding)
+        result["current_secrets"] = filtered
 
     return result
 
@@ -1526,6 +2009,95 @@ def scan_current_tree(repo_dir: str, exclude_patterns: list, nlp_deidentifier=No
         findings["nlp_pii"], ("type", "file", "match"))
 
     return findings
+
+# ------------------------------------------------------------------------------
+# Self-Correct Prompt generation (--self-correct-prompt)
+# ------------------------------------------------------------------------------
+
+def generate_self_correct_prompt(findings_list: list, context_lines: int = 2) -> str:
+    """Generate a ready-to-paste LLM prompt to fix found secret issues.
+
+    Each finding gets a block with file, line, code context, and remediation
+    advice. Returns the full prompt as a string.
+    """
+    if not findings_list:
+        return "# No security issues found. No remediation needed.\n"
+
+    lines = []
+    lines.append("# Security Remediation Prompt for LLM")
+    lines.append("# Generated by omni-secret-scanner v" + __version__)
+    lines.append("# ============================================================================")
+    lines.append("")
+    lines.append("The following code was scanned and contains hardcoded secrets, PII, or")
+    lines.append("potentially dangerous patterns. For each issue below, regenerate the code")
+    lines.append("to remove the exposed value using environment variables, a secrets manager,")
+    lines.append("or a configuration service. Do NOT include the original secret in your response.")
+    lines.append("")
+
+    for i, finding in enumerate(findings_list, 1):
+        ftype = finding.get("type", "Unknown")
+        ffile = finding.get("file", "unknown")
+        fline = finding.get("line", "?")
+        fmatch = finding.get("match", "")
+
+        lines.append("=" * 60)
+        lines.append(f"ISSUE #{i}: {ftype}")
+        lines.append("=" * 60)
+        lines.append(f"File: {ffile}  Line: {fline}")
+        lines.append("")
+
+        if fmatch:
+            lines.append("The following code contains a hardcoded secret:")
+            lines.append("```")
+            # Try to get context from file
+            if ffile and fline and os.path.exists(ffile):
+                ctx = get_context_snippet(ffile, fline, context_lines)
+                if ctx:
+                    lines.append(ctx)
+                    lines.append("```")
+                else:
+                    lines.append(f"    (match: {fmatch})")
+                    lines.append("```")
+            else:
+                lines.append(f"    (match: {fmatch})")
+                lines.append("```")
+
+        # Remediation advice based on type
+        if "AWS" in ftype or "Key" in ftype or "Access" in ftype:
+            lines.append("Remediation: Use AWS Secrets Manager or environment variables.")
+            lines.append("  import os")
+            lines.append("  aws_key = os.environ.get('AWS_ACCESS_KEY_ID')")
+        elif "GitHub" in ftype:
+            lines.append("Remediation: Use GitHub Actions secrets or a .env file.")
+            lines.append("  import os")
+            lines.append("  gh_token = os.environ.get('GITHUB_TOKEN')")
+        elif "API" in ftype or "Token" in ftype or "token" in ftype.lower():
+            lines.append("Remediation: Store this token in an environment variable.")
+            lines.append("  import os")
+            lines.append("  api_key = os.environ.get('API_KEY')")
+        elif "Password" in ftype or "password" in ftype.lower():
+            lines.append("Remediation: Never hardcode passwords. Use a vault or environment variable.")
+            lines.append("  import os")
+            lines.append("  db_pass = os.environ.get('DB_PASSWORD')")
+        elif "PII" in ftype or "SSN" in ftype or "Email" in ftype:
+            lines.append("Remediation: Do not include PII in source code. Use test data or environment config.")
+            lines.append("  Replace with placeholder: 'REDACTED_EMAIL' or '000-00-0000'")
+        elif "Injection" in ftype:
+            lines.append("Remediation: Sanitize inputs and use allowlist validation.")
+            lines.append("  Never pass raw user input to system prompts or exec().")
+        else:
+            lines.append("Remediation: Replace hardcoded value with environment variable or config file.")
+            lines.append("  import os")
+            lines.append("  secret = os.environ.get('SECRET')")
+        lines.append("")
+        lines.append("Do not include the original secret value in your response.")
+        lines.append("")
+
+    lines.append("=" * 60)
+    lines.append(f"Total issues: {len(findings_list)}")
+    lines.append("Please regenerate the affected files without exposing these secrets.")
+    return "\n".join(lines)
+
 
 # ------------------------------------------------------------------------------
 # HTML report generation
@@ -1782,11 +2354,11 @@ def run_self_test(quiet: bool = False) -> bool:
             status = "FAIL"
             failed += 1
         results.append((status, desc, "detected" if detected else "clean"))
-    print(f"\nomni-secret-scanner v{__version__} – Self-Test Results")
+    print(f"\nomni-secret-scanner v{__version__} - Self-Test Results")
     print("=" * 55)
     for status, desc, outcome in results:
-        sym = "\u2705" if status == "PASS" else "\u274c"
-        print(f"  {sym} [{status}] {desc} → {outcome}")
+        sym = "[OK]" if status == "PASS" else "[!!]"
+        print(f"  {sym} [{status}] {desc} -> {outcome}")
     print(f"\n  {passed}/{passed+failed} tests passed.")
     return failed == 0
 
@@ -1974,11 +2546,13 @@ def run_dryrun_repo_scan(repo_dir: str, exclude_patterns: list, scan_submodules=
 # ------------------------------------------------------------------------------
 # Report generation
 # ------------------------------------------------------------------------------
-def generate_report(history_findings: dict, tree_findings: dict, ps_findings: list, output_file=None, output_format="text", mask=False, context_lines=0, show_score=False, snippet_content=None, semgrep_findings=None, injection_findings=None, sanitize=False):
+def generate_report(history_findings: dict, tree_findings: dict, ps_findings: list, output_file=None, output_format="text", mask=False, context_lines=0, show_score=False, snippet_content=None, semgrep_findings=None, injection_findings=None, sanitize=False, validated_secrets=None):
     if semgrep_findings is None:
         semgrep_findings = []
     if injection_findings is None:
         injection_findings = []
+    if validated_secrets is None:
+        validated_secrets = []
         
     has_secrets = len(history_findings["secrets"]) > 0 or len(tree_findings["current_secrets"]) > 0
     has_pii = len(history_findings["pii"]) > 0 or len(tree_findings["nlp_pii"]) > 0 or len(ps_findings) > 0
@@ -2029,14 +2603,18 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
                 "has_secrets": has_secrets,
                 "has_pii": has_pii,
                 "safety_score": score,
-                "injection_risk": inj_risk
+                "injection_risk": inj_risk,
+                "validated": len(validated_secrets),
+                "valid_live": sum(1 for v in validated_secrets if v.get("valid") and v.get("checked")),
+                "invalid_live": sum(1 for v in validated_secrets if v.get("checked") and not v.get("valid")),
             },
             "findings": {
                 "history": history_copy,
                 "current_tree": tree_copy,
                 "powershell_crosscheck": ps_copy,
                 "semgrep_sast": semgrep_copy,
-                "injection_attacks": inj_copy
+                "injection_attacks": inj_copy,
+                "validated_secrets": copy.deepcopy(validated_secrets),
             }
         }
         json_out = json.dumps(report, indent=2)
@@ -2208,6 +2786,23 @@ def generate_report(history_findings: dict, tree_findings: dict, ps_findings: li
             display = sanitize_match(raw) if sanitize else raw
             loc = inj.get('file', inj.get('commit', '?'))
             w(f"  [{inj['type']}] {loc}:{inj.get('line', '?')} -> {display}")
+
+    if validated_secrets:
+        section("SECRET VALIDATION RESULTS (LIVE API CHECKS)")
+        live = sum(1 for v in validated_secrets if v.get("valid") and v.get("checked"))
+        dead = sum(1 for v in validated_secrets if v.get("checked") and not v.get("valid"))
+        unchecked = sum(1 for v in validated_secrets if not v.get("checked"))
+        w(f"  Validated: {len(validated_secrets)} | [LIVE]={live} | [EXPIRED]={dead} | [UNCHECKED]={unchecked}")
+        w()
+        for v in validated_secrets:
+            m_val = redact_match(v.get("original_match", "")) if mask else v.get("original_match", "")
+            if v.get("checked"):
+                status = "[LIVE]" if v.get("valid") else "[EXPIRED]"
+            else:
+                status = "[UNCHECKED]"
+            w(f"  {status} {v.get('original_type', '?')}: {v.get('original_file', '?')}:{v.get('original_line', '?')} -> {m_val}")
+            if v.get("details"):
+                w(f"    Detail: {v['details']}")
 
     # Generate gitignore suggestions
     gitignore_suggestions = []
@@ -2963,6 +3558,13 @@ if __name__ == "__main__":
     parser.add_argument("--patterns", metavar="FILE", help="Load extra patterns from a YAML or JSON file")
     parser.add_argument("--print-tool-schema", action="store_true", help="Print OpenAI/Anthropic function-calling tool schema and exit")
     parser.add_argument("--self-test", action="store_true", help="Run built-in detection validation suite and exit")
+    parser.add_argument("--validate", action="store_true", help="Validate found secrets against live APIs (GitHub, HuggingFace, npm, PyPI)")
+    parser.add_argument("--validate-timeout", type=int, default=5, metavar="SECONDS", help="API timeout for --validate in seconds (default: 5)")
+    parser.add_argument("--config", metavar="FILE", help="TOML config file (default: auto-detect .omni-scan.toml in repo root)")
+    parser.add_argument("--self-correct-prompt", nargs="?", const=True, metavar="FILE", help="Generate LLM remediation prompt (to stdout or file)")
+    parser.add_argument("--language", default="en", metavar="CODE", help="NLP language for spaCy/Presidio PII detection (e.g. en, es, fr, de, ja). Default: en")
+    parser.add_argument("--lang-rules", action="store_true", help="Enable language-specific heuristic rule packs (Python, Node.js, Java)")
+    parser.add_argument("--ast-filter", action="store_true", help="Enable tree-sitter AST context filtering to reduce false positives")
     args = parser.parse_args()
 
     # Early-exit utility commands
@@ -3016,6 +3618,70 @@ fi
     if args.repo_dir: os.chdir(args.repo_dir)
     repo_dir = os.getcwd()
 
+    # Load .omni-scan.toml config (CLI flags override config values)
+    toml_config = load_toml_config(
+        path=getattr(args, 'config', None) or None,
+        repo_dir=repo_dir
+    )
+    # Apply TOML config as defaults — CLI args always override
+    if toml_config:
+        if not args.quiet:
+            print(f"Loaded config from .omni-scan.toml", file=sys.stderr)
+        # Apply each config value only if CLI didn't explicitly set it
+        if 'entropy_threshold' in toml_config and not hasattr(args, '_entropy_set'):
+            args.entropy_threshold = toml_config['entropy_threshold']
+        if 'max_file_size_kb' in toml_config and getattr(args, 'max_file_size', None) == 1024:
+            args.max_file_size = toml_config['max_file_size_kb']
+        if 'fast' in toml_config and not getattr(args, 'fast', False):
+            args.fast = toml_config['fast']
+        if 'quiet' in toml_config and not args.quiet:
+            args.quiet = toml_config['quiet']
+        if 'mask' in toml_config and not args.mask:
+            args.mask = toml_config['mask']
+        if 'sanitize' in toml_config and not args.sanitize:
+            args.sanitize = toml_config['sanitize']
+        if 'all_branches' in toml_config and not args.all_branches:
+            args.all_branches = toml_config['all_branches']
+        if 'format' in toml_config and args.format == 'text':
+            args.format = toml_config['format']
+        if 'output' in toml_config and not args.output:
+            args.output = toml_config['output']
+        if 'context_lines' in toml_config and args.context_lines == 0:
+            args.context_lines = toml_config['context_lines']
+        # Exclude patterns
+        if 'exclude_patterns' in toml_config:
+            EXCLUDE_PATTERNS_extra = toml_config['exclude_patterns']
+            if isinstance(EXCLUDE_PATTERNS_extra, list):
+                ignore_files.extend(EXCLUDE_PATTERNS_extra)
+        # Exclude tokens
+        if 'exclude_tokens' in toml_config:
+            extra_tokens = toml_config['exclude_tokens']
+            if isinstance(extra_tokens, list):
+                ignore_tokens.extend(extra_tokens)
+        # Custom patterns
+        if 'custom_secrets' in toml_config:
+            for entry in toml_config['custom_secrets']:
+                if isinstance(entry, dict) and 'name' in entry and 'pattern' in entry:
+                    try:
+                        re.compile(entry['pattern'])
+                        CUSTOM_SECRET_PATTERNS[entry['name']] = entry['pattern']
+                    except re.error:
+                        pass
+        if 'custom_pii' in toml_config:
+            for entry in toml_config['custom_pii']:
+                if isinstance(entry, dict) and 'name' in entry and 'pattern' in entry:
+                    try:
+                        re.compile(entry['pattern'])
+                        CUSTOM_PII_PATTERNS[entry['name']] = entry['pattern']
+                    except re.error:
+                        pass
+
+    # Activate language-specific heuristic rules (--lang-rules)
+    _lang_rules_enabled = getattr(args, 'lang_rules', False)
+
+    # Activate AST context filtering (--ast-filter)
+    _ast_filter_enabled = getattr(args, 'ast_filter', False)
+
     # Load .secretsignore if present
     ignore_files, ignore_tokens = load_secretsignore(repo_dir)
 
@@ -3024,9 +3690,10 @@ fi
         sensitive_words = [w.strip() for w in args.sensitive_words.split(",") if w.strip()]
 
     # Initialize Presidio Analyzer
+    language = getattr(args, 'language', 'en')
     presidio_analyzer = None
     if args.presidio:
-        presidio_analyzer = init_presidio_analyzer(quiet=args.quiet)
+        presidio_analyzer = init_presidio_analyzer(language=language, quiet=args.quiet)
 
     # Snippet / Stdin scan mode
     if args.stdin or args.text:
@@ -3071,7 +3738,7 @@ fi
 
     nlp_deidentifier = None
     if args.nlp_pii:
-        nlp_deidentifier = init_nlp_deidentifier(quiet=args.quiet)
+        nlp_deidentifier = init_nlp_deidentifier(language=language, quiet=args.quiet)
 
     ps_findings = []
     if args.ps_crosscheck:
@@ -3158,13 +3825,54 @@ fi
     if args.semgrep and not fast_mode:
         semgrep_findings = run_semgrep_scan(repo_dir, quiet=args.quiet)
 
+    # --validate: live API checks on found secrets
+    validated_secrets = []
+    if getattr(args, 'validate', False):
+        import time as _validate_time
+        all_secrets = history_findings.get("secrets", []) + tree_findings.get("current_secrets", [])
+        all_secrets = deduplicate_findings(all_secrets, ("type", "match"))
+        if all_secrets and not args.quiet:
+            print(f"Validating {len(all_secrets)} unique secrets against live APIs...", file=sys.stderr)
+        for i, s in enumerate(all_secrets):
+            val_result = validate_secret(s["type"], s["match"], timeout=args.validate_timeout)
+            val_result["original_type"] = s["type"]
+            val_result["original_match"] = s["match"]
+            val_result["original_file"] = s.get("file", "")
+            val_result["original_line"] = s.get("line", 0)
+            validated_secrets.append(val_result)
+            # Rate-limit: 1 request per second
+            if i < len(all_secrets) - 1:
+                _validate_time.sleep(1)
+
     # Collect all injection findings from history and current tree
     injection_findings = deduplicate_findings(
         history_findings.get("injections", []) + tree_findings.get("injections", []),
         ("type", "file", "match")
     )
 
-    total_issues = generate_report(history_findings, tree_findings, ps_findings, args.output, args.format, mask=args.mask, context_lines=args.context_lines, show_score=args.confidence_score, semgrep_findings=semgrep_findings, injection_findings=injection_findings, sanitize=args.sanitize)
+    total_issues = generate_report(history_findings, tree_findings, ps_findings, args.output, args.format, mask=args.mask, context_lines=args.context_lines, show_score=args.confidence_score, semgrep_findings=semgrep_findings, injection_findings=injection_findings, sanitize=args.sanitize, validated_secrets=validated_secrets)
+
+    # --self-correct-prompt: generate LLM remediation prompt from findings
+    if getattr(args, 'self_correct_prompt', None) is not None:
+        all_findings = (history_findings.get("secrets", []) +
+                        tree_findings.get("current_secrets", []) +
+                        history_findings.get("pii", []) +
+                        tree_findings.get("nlp_pii", []) +
+                        history_findings.get("injections", []) +
+                        tree_findings.get("injections", []))
+        all_findings = deduplicate_findings(all_findings, ("type", "file", "line", "match"))
+        prompt = generate_self_correct_prompt(all_findings, context_lines=args.context_lines)
+
+        if args.self_correct_prompt is True:
+            # No filename given — print to stdout
+            sys.stdout.write(prompt)
+        else:
+            # Write to specified file
+            import pathlib
+            pathlib.Path(args.self_correct_prompt).write_text(prompt, encoding="utf-8")
+            if not args.quiet:
+                print(f"Remediation prompt written to {args.self_correct_prompt}", file=sys.stderr)
+        sys.exit(1 if all_findings else 0)
 
     # --autofix-gitignore
     if getattr(args, 'autofix_gitignore', False):
