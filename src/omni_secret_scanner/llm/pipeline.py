@@ -1,8 +1,17 @@
 # SPDX-License-Identifier: MIT
-"""End-to-end LLM triage pipeline.
+"""
+End-to-end security analysis pipeline using the state machine.
 
-Ties together middleware → orchestrator → report generation.
-Activated via --llm-triage flag on the CLI.
+Orchestrates:
+  0. DISCOVER — profile repo, collect cheap evidence
+  1. SCORE    — risk pre-scoring from evidence
+  2. ROUTE    — assign engines based on type + risk
+  3. ANALYZE  — run assigned engines
+  4. VERIFY   — external validation
+  5. CORRELATE — group by asset
+  6. REMEDIATE — (future) auto-fix
+
+Activated via --pipeline flag.
 """
 
 from __future__ import annotations
@@ -14,188 +23,229 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .state_machine import (
+    Finding, FindingState, Pipeline, RiskTier, ValidationStatus,
+)
+from .profiler import profile_repository, engines_to_skip
+from .evidence import raw_to_finding
+from .scorer import ScorePlugin
+from .router import RouterPlugin, dispatch_engine
+from .correlation import VerifyPlugin, correlate_batch
+
 
 @dataclass
-class LLMTriageConfig:
-    """Configuration for the LLM triage pipeline."""
+class PipelineConfig:
+    """Configuration for the security analysis pipeline."""
 
-    # Input
-    json_input: Optional[str] = None  # path to scanner JSON output, or None to run scan first
-
-    # Model providers
-    tier1_provider: str = "none"  # openai | anthropic | local | none
-    tier1_model: str = "gpt-4o-mini"
-    tier1_endpoint: str = "http://localhost:11434/api/generate"
-
-    tier2_provider: str = "none"  # openai | anthropic | local | none
-    tier2_model: str = "claude-sonnet-4-20250514"
-
-    # Output
-    output_file: Optional[str] = None  # write triage report to file
-    quiet: bool = False
-
-    # Scan options (used if json_input is None)
     repo_dir: str = "."
-    scan_args: dict = field(default_factory=dict)
+    json_input: Optional[str] = None  # existing scan JSON, or None to run scan
 
-    # Limits
-    max_files: int = 50  # max files to send to LLM
-    min_risk: str = "medium"  # minimum risk level to send to LLM
+    # Profiling
+    profile: bool = True
+    skip_engines: bool = True  # skip engines not needed per profile
+
+    # Tiers
+    max_findings: int = 500
+    quiet: bool = False
+    output_file: Optional[str] = None
 
 
-def run_llm_triage(config: LLMTriageConfig) -> dict:
-    """Run the full LLM triage pipeline.
+def run_pipeline(config: PipelineConfig) -> dict:
+    """Run the full security analysis pipeline.
 
-    1. Get scanner JSON (run scan or load existing)
-    2. Parse, group, prune findings
-    3. Classify risk per file
-    4. Route to tiered inference
-    5. Generate triage report
-
-    Returns the triage report dict.
+    1. Profile repo (or load existing scan JSON)
+    2. Convert raw findings → Finding objects with evidence
+    3. Score each finding
+    4. Route to engines
+    5. Dispatch engines for CRITICAL/HIGH findings
+    6. Verify against external sources
+    7. Correlate into assets
     """
     t0 = time.time()
+    result: dict = {}
 
     # ------------------------------------------------------------------
-    # Step 1: Get scanner data
+    # Stage 0: Repository profiling
     # ------------------------------------------------------------------
-    if config.json_input and Path(config.json_input).exists():
+    if config.profile and not config.json_input:
         if not config.quiet:
-            print(f"Loading existing scan: {config.json_input}", file=sys.stderr)
+            print("[Stage 0] Profiling repository...", file=sys.stderr)
+        profile = profile_repository(config.repo_dir, quiet=config.quiet)
+        result["profile"] = profile
+        if config.skip_engines:
+            skip = engines_to_skip(profile)
+            if not config.quiet:
+                print(f"  Languages: {dict(list(profile['languages'].items())[:5])}",
+                      file=sys.stderr)
+                print(f"  Frameworks: {profile['frameworks']}", file=sys.stderr)
+                print(f"  Repo type: {profile['repo_type']}", file=sys.stderr)
+                if skip:
+                    print(f"  Skipping engines: {skip}", file=sys.stderr)
+            result["engines_skipped"] = skip
+
+    # ------------------------------------------------------------------
+    # Stage 1: Evidence collection
+    # ------------------------------------------------------------------
+    if not config.quiet:
+        print("[Stage 1] Collecting evidence...", file=sys.stderr)
+
+    if config.json_input and Path(config.json_input).exists():
         scan_data = json.loads(Path(config.json_input).read_text(encoding="utf-8"))
     else:
-        if not config.quiet:
-            print("Running scanner...", file=sys.stderr)
-        scan_data = _run_scanner(config)
+        scan_data = _run_fast_scan(config)
 
-    # ------------------------------------------------------------------
-    # Step 2: Parse and group
-    # ------------------------------------------------------------------
-    from .middleware import (
-        extract_all_findings, group_by_file, prune_findings,
-        classify_risk, get_file_context, build_stats,
-    )
-
-    all_findings = extract_all_findings(scan_data)
+    from .middleware import extract_all_findings
+    raw_findings = extract_all_findings(scan_data)
     if not config.quiet:
-        print(f"Total raw findings: {len(all_findings)}", file=sys.stderr)
+        print(f"  Raw findings: {len(raw_findings)}", file=sys.stderr)
 
-    grouped = group_by_file(all_findings)
+    findings = [raw_to_finding(r, i) for i, r in enumerate(raw_findings[:config.max_findings])]
     if not config.quiet:
-        print(f"Files affected: {len(grouped)}", file=sys.stderr)
+        print(f"  Converted to evidence: {len(findings)}", file=sys.stderr)
 
-    cleaned = prune_findings(grouped)
+    # ------------------------------------------------------------------
+    # Stage 2: Risk pre-scoring
+    # ------------------------------------------------------------------
     if not config.quiet:
-        total_clean = sum(len(v) for v in cleaned.values())
-        print(f"After pruning: {total_clean} findings in {len(cleaned)} files",
-              file=sys.stderr)
+        print("[Stage 2] Pre-scoring risks...", file=sys.stderr)
 
-    stats = build_stats(cleaned, scan_data)
+    scorer = ScorePlugin()
+    for f in findings:
+        scorer.execute(f)
+
+    by_tier: dict[str, int] = {}
+    for f in findings:
+        t = f.risk_tier.value
+        by_tier[t] = by_tier.get(t, 0) + 1
+    if not config.quiet:
+        print(f"  Risk distribution: {by_tier}", file=sys.stderr)
+    result["risk_distribution"] = by_tier
 
     # ------------------------------------------------------------------
-    # Step 3: Classify and sort by risk
+    # Stage 3: Engine routing
     # ------------------------------------------------------------------
-    risk_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    file_risks: list[tuple[str, str, list[dict]]] = []
-    for filepath, items in cleaned.items():
-        risk = classify_risk(items)
-        file_risks.append((filepath, risk, items))
+    if not config.quiet:
+        print("[Stage 3] Routing to engines...", file=sys.stderr)
 
-    file_risks.sort(key=lambda x: risk_order.get(x[1], 99))
+    router = RouterPlugin()
+    routed_count = 0
+    for f in findings:
+        router.execute(f)
+        if f.assigned_engines:
+            routed_count += 1
+    if not config.quiet:
+        print(f"  Routed to engines: {routed_count} findings", file=sys.stderr)
 
-    # Filter by minimum risk level
-    min_risk_val = risk_order.get(config.min_risk, 2)
-    file_risks = [(fp, r, items) for fp, r, items in file_risks
-                  if risk_order.get(r, 99) <= min_risk_val]
+    # ------------------------------------------------------------------
+    # Stage 4: Deep analysis (engine dispatch)
+    # ------------------------------------------------------------------
+    if not config.quiet:
+        print("[Stage 4] Running deep analysis...", file=sys.stderr)
+
+    analyzed = 0
+    escalated = 0
+    for f in findings:
+        if f.risk_tier in (RiskTier.CRITICAL, RiskTier.HIGH):
+            for engine in f.assigned_engines:
+                dispatch_engine(engine, f, config.repo_dir)
+            analyzed += 1
+            f.state = FindingState.ANALYZE
+            if f.metadata.get("needs_escalation"):
+                escalated += 1
+        else:
+            f.state = FindingState.ANALYZE  # skip for MEDIUM/LOW/INFO
 
     if not config.quiet:
-        print(f"Files to triage (risk >= {config.min_risk}): {len(file_risks)}",
-              file=sys.stderr)
+        print(f"  Deep analysis: {analyzed} findings", file=sys.stderr)
+        print(f"  Escalated to LLM: {escalated} findings", file=sys.stderr)
+    result["deep_analysis_count"] = analyzed
+    result["escalated_count"] = escalated
 
     # ------------------------------------------------------------------
-    # Step 4: Tiered inference
+    # Stage 5: Verification
     # ------------------------------------------------------------------
-    from .orchestrator import TriageOrchestrator, create_provider
+    if not config.quiet:
+        print("[Stage 5] Verifying findings...", file=sys.stderr)
 
-    tier1 = create_provider(config.tier1_provider,
-                            model=config.tier1_model,
-                            endpoint=config.tier1_endpoint)
-    tier2 = create_provider(config.tier2_provider,
-                            model=config.tier2_model)
-    orchestrator = TriageOrchestrator(tier1=tier1, tier2=tier2)
+    verifier = VerifyPlugin()
+    verified = 0
+    validated = 0
+    for f in findings:
+        if f.risk_tier in (RiskTier.CRITICAL, RiskTier.HIGH):
+            verifier.execute(f)
+            verified += 1
+            if f.validation_status == ValidationStatus.VALID:
+                validated += 1
 
-    triaged_files: list[dict] = []
-
-    for i, (filepath, risk, items) in enumerate(file_risks[:config.max_files]):
-        if not config.quiet:
-            print(f"  [{i+1}/{min(len(file_risks), config.max_files)}] "
-                  f"Triaging {filepath} ({risk})...", file=sys.stderr)
-
-        file_context = get_file_context(filepath, config.repo_dir)
-        results = orchestrator.triage_file(filepath, items, risk, file_context)
-
-        fp_count = sum(1 for r in results if r.get("triage_verdict") == "FALSE_POSITIVE")
-        tp_count = sum(1 for r in results if r.get("triage_verdict") == "TRUE_POSITIVE")
-        un_count = len(results) - fp_count - tp_count
-
-        triaged_files.append({
-            "file": filepath,
-            "risk": risk,
-            "total": len(results),
-            "true_positives": tp_count,
-            "false_positives": fp_count,
-            "uncertain": un_count,
-            "findings": results,
-        })
-
-        # Rate-limit: 1 request per second for API calls
-        if tier1 or tier2:
-            time.sleep(0.5)
+    if not config.quiet:
+        print(f"  Verified: {verified} | Confirmed live: {validated}", file=sys.stderr)
+    result["verified_count"] = verified
+    result["validated_live"] = validated
 
     # ------------------------------------------------------------------
-    # Step 5: Build report
+    # Stage 6: Correlation
     # ------------------------------------------------------------------
-    from .prompts import build_summary_prompt
+    if not config.quiet:
+        print("[Stage 6] Correlating into assets...", file=sys.stderr)
 
-    top_files = [(tf["file"], tf["risk"], tf["total"]) for tf in triaged_files[:10]]
-    summary_prompt = build_summary_prompt(stats, top_files)
-
-    report = {
-        "pipeline_version": "1.0.0",
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "scan_summary": stats,
-        "executive_summary": summary_prompt,
-        "files_triaged": len(triaged_files),
-        "total_true_positives": sum(tf["true_positives"] for tf in triaged_files),
-        "total_false_positives": sum(tf["false_positives"] for tf in triaged_files),
-        "total_uncertain": sum(tf["uncertain"] for tf in triaged_files),
-        "elapsed_seconds": round(time.time() - t0, 1),
-        "triaged_files": triaged_files,
+    assets = correlate_batch(findings)
+    if not config.quiet:
+        for asset_id, data in sorted(assets.items(), key=lambda x: -x[1]["max_score"])[:10]:
+            if data["total"] > 0:
+                print(f"  [{data['risk_tier'].value.upper():8s}] {asset_id}: {data['summary']}",
+                      file=sys.stderr)
+    result["assets"] = {
+        asset_id: {
+            "risk": data["risk_tier"].value,
+            "total": data["total"],
+            "summary": data["summary"],
+        }
+        for asset_id, data in assets.items()
+        if data["total"] > 0
     }
+
+    # ------------------------------------------------------------------
+    # Final summary
+    # ------------------------------------------------------------------
+    elapsed = round(time.time() - t0, 1)
+    result["elapsed_seconds"] = elapsed
+    result["total_findings"] = len(findings)
+
+    if not config.quiet:
+        print(f"\nPipeline complete ({elapsed}s)", file=sys.stderr)
+        print(f"  Findings: {len(findings)}", file=sys.stderr)
+        print(f"  Assets: {len(result['assets'])}", file=sys.stderr)
+        if escalated:
+            print(f"  Escalated (needs human): {escalated}", file=sys.stderr)
 
     # Write output
     if config.output_file:
+        # Convert findings to serializable form
+        serializable = {
+            **result,
+            "findings": [
+                {
+                    "id": f.id, "file": f.file, "line": f.line,
+                    "type": f.finding_type, "risk_score": f.risk_score,
+                    "risk_tier": f.risk_tier.value, "state": f.state.value,
+                    "validation": f.validation_status.value,
+                    "asset_id": f.asset_id,
+                    "assigned_engines": f.assigned_engines,
+                }
+                for f in findings
+            ],
+        }
         Path(config.output_file).write_text(
-            json.dumps(report, indent=2, default=str), encoding="utf-8"
+            json.dumps(serializable, indent=2, default=str), encoding="utf-8"
         )
         if not config.quiet:
-            print(f"\nTriage report written to {config.output_file}", file=sys.stderr)
+            print(f"Pipeline report: {config.output_file}", file=sys.stderr)
 
-    # Print summary
-    if not config.quiet:
-        print(f"\n{'='*60}", file=sys.stderr)
-        print(f"LLM Triage complete ({report['elapsed_seconds']}s)", file=sys.stderr)
-        print(f"  Files triaged:   {report['files_triaged']}", file=sys.stderr)
-        print(f"  True positives:  {report['total_true_positives']}", file=sys.stderr)
-        print(f"  False positives: {report['total_false_positives']}", file=sys.stderr)
-        print(f"  Uncertain:       {report['total_uncertain']}", file=sys.stderr)
-        print(f"{'='*60}", file=sys.stderr)
-
-    return report
+    return result
 
 
-def _run_scanner(config: LLMTriageConfig) -> dict:
-    """Run the scanner inline and capture JSON output."""
+def _run_fast_scan(config: PipelineConfig) -> dict:
+    """Run a fast, cheap scan for evidence collection."""
     import io
     from ..cli import main as cli_main
 
@@ -206,25 +256,17 @@ def _run_scanner(config: LLMTriageConfig) -> dict:
     try:
         sys.stdout = buf
         sys.stderr = io.StringIO() if config.quiet else sys.stderr
-
-        # Build minimal args for a scan
-        import argparse
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--format", default="json")
-        parser.add_argument("--fast", action="store_true")
-        parser.add_argument("--quiet", action="store_true")
-        parser.add_argument("--repo-dir", default=config.repo_dir)
-
-        ns = parser.parse_args([
-            "--format", "json",
-            "--fast",
-            "--quiet",
+        cli_main(argv=[
+            "--format", "json", "--fast", "--quiet",
             "--repo-dir", config.repo_dir,
         ])
-        cli_main(argv=["--format", "json", "--fast", "--quiet",
-                        "--repo-dir", config.repo_dir])
+    except SystemExit:
+        pass
     finally:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
 
-    return json.loads(buf.getvalue())
+    try:
+        return json.loads(buf.getvalue())
+    except json.JSONDecodeError:
+        return {"findings": {}}

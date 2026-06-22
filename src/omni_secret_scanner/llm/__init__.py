@@ -1,21 +1,42 @@
 # SPDX-License-Identifier: MIT
 """
-LLM Integration Pipeline for RGT Codebase Scanner.
-
-Middleware that ingests scanner JSON output, groups findings by file
-and risk level, prunes noise, and prepares structured prompts for
-tiered LLM inference — maximising signal-to-noise before the data
-hits the model.
+LLM Integration & Security Analysis Pipeline for RGT Codebase Scanner.
 
 Architecture:
-    1. Middleware:  Parse JSON, group by file, prune low-signal hits
-    2. Orchestrator: Tiered routing (small model for FP triage,
-                     large model for exploitability analysis)
-    3. Prompts:      CISSP-grade system prompts + per-file templates
-    4. Tools:        Function-calling schema for targeted re-scans
+  state_machine.py — Finding state machine (DISCOVER→SCORE→ROUTE→...)
+  profiler.py      — Stage 0: Repository profiling (--profile)
+  evidence.py      — Stage 1: Evidence collection (cheap signals only)
+  scorer.py        — Stage 2: Risk pre-scoring (rules, not ML)
+  router.py        — Stage 3: Deterministic engine routing
+  pipeline.py      — End-to-end pipeline orchestrator (--pipeline)
+  correlation.py   — Stage 5-6: Verification + asset correlation
+  middleware.py    — Legacy: JSON parser, grouper, noise filter
+  orchestrator.py  — Legacy: Tiered inference routing
+  prompts.py       — CISSP-grade system prompts
+  tools.py         — Function-calling schema integration
+
+Quick start:
+  omni-scan --profile            # profile repo, recommend engines
+  omni-scan --pipeline           # full analysis pipeline
+  omni-scan --llm-triage         # legacy LLM triage mode
 """
 
-# Re-export the pipeline entry point
-from .pipeline import run_llm_triage, LLMTriageConfig
+# New state-machine pipeline
+from .pipeline import run_pipeline, PipelineConfig
 
-__all__ = ["run_llm_triage", "LLMTriageConfig"]
+# Legacy triage pipeline (kept for backward compat)
+from .middleware import (
+    extract_all_findings, group_by_file, prune_findings,
+    classify_risk, build_stats, get_file_context,
+)
+
+__all__ = [
+    "run_pipeline",
+    "PipelineConfig",
+    "extract_all_findings",
+    "group_by_file",
+    "prune_findings",
+    "classify_risk",
+    "build_stats",
+    "get_file_context",
+]

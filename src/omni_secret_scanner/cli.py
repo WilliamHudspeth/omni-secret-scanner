@@ -240,6 +240,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--profile",
+        action="store_true",
+        help="Profile repository: detect languages, frameworks, and recommend engines to skip",
+    )
+    p.add_argument(
+        "--pipeline",
+        metavar="FILE",
+        nargs="?",
+        const="auto",
+        help=(
+            "Run full security analysis pipeline (DISCOVER→SCORE→ROUTE→"
+            "ANALYZE→VERIFY→CORRELATE). Optional: output file path."
+        ),
+    )
+    p.add_argument(
         "--validate",
         action="store_true",
         help="Validate found secrets against live APIs (GitHub, HuggingFace, npm, PyPI)",
@@ -665,6 +680,29 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
             return _scan_single_file(job)
 
         run_watch_mode(repo_dir, _scan_watch_file, _DEFAULT_EXCLUDE_PATTERNS, quiet=args.quiet)
+        return 0
+
+    # ── --profile: repository profiling report ─────────────────────────────
+    if args.profile:
+        from omni_secret_scanner.llm.profiler import profile_repository, engines_to_skip
+        profile = profile_repository(repo_dir, quiet=args.quiet)
+        if not args.quiet:
+            skip = engines_to_skip(profile)
+            if skip:
+                print(f"\nTo skip these engines: omni-scan --skip-engines "
+                      f"{','.join(skip)}", file=sys.stderr)
+        return 0
+
+    # ── --pipeline: full security analysis pipeline ────────────────────────
+    if getattr(args, "pipeline", None) is not None:
+        from omni_secret_scanner.llm.pipeline import run_pipeline, PipelineConfig
+        output = None if args.pipeline == "auto" else args.pipeline
+        config = PipelineConfig(
+            repo_dir=repo_dir,
+            quiet=args.quiet,
+            output_file=output or args.output,
+        )
+        run_pipeline(config)
         return 0
 
     # ── Load .omni-scan.toml (CLI flags take precedence) ────────────────────
