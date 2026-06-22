@@ -1,0 +1,39 @@
+# Omni Secret Scanner - Requirements
+# ==============================================================================
+# Core dependencies: none (stdlib only — argparse, re, json, subprocess, etc.)
+# Everything below is optional, gated behind feature flags or try/except guards.
+# The scanner is fully functional without any of these installed.
+
+# ---------------------------------------------------------------------------
+# Progress bars (--progress / interactive mode)
+# ---------------------------------------------------------------------------
+tqdm>=4.64.0
+
+# ---------------------------------------------------------------------------
+# External pattern packs (--patterns / -P)
+# ---------------------------------------------------------------------------
+pyyaml>=6.0
+
+# ---------------------------------------------------------------------------
+# NLP PII de-identification (--nlp-pii)
+#   Requires spaCy model: python -m spacy download en_core_web_sm
+# ---------------------------------------------------------------------------
+text-deidentification>=1.0.0
+spacy>=3.5.0
+
+# ---------------------------------------------------------------------------
+# Microsoft Presidio NLP scanning (--presidio)
+#   Higher accuracy PII detection, separate from the spaCy path above
+# ---------------------------------------------------------------------------
+presidio-analyzer>=2.2.0
+
+# ---------------------------------------------------------------------------
+# Semgrep SAST scanning (invoked as CLI tool, not imported)
+#   Must be on PATH; also usable as `pip install semgrep`
+# ---------------------------------------------------------------------------
+# semgrep>=1.0.0
+
+# ---------------------------------------------------------------------------
+# Testing
+# ---------------------------------------------------------------------------
+pytest>=7.0.0
