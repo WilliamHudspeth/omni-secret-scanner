@@ -1,0 +1,44 @@
+# Bitbucket Pipelines template for omni-secret-scanner
+# Drop this into bitbucket-pipelines.yml or include it.
+
+image: python:3.12-slim
+
+definitions:
+  steps:
+    - step: &secret-scan
+        name: Secret Scanner
+        script:
+          - pip install omni-secret-scanner
+          # Scan only the diff of this branch vs main
+          - |
+            if [ -n "$BITBUCKET_PR_DESTINATION_BRANCH" ]; then
+              git fetch origin $BITBUCKET_PR_DESTINATION_BRANCH
+              omni-scan --diff origin/$BITBUCKET_PR_DESTINATION_BRANCH.. \
+                --format sarif --output results.sarif \
+                --confidence-score --quiet
+            else
+              omni-scan --fast --format sarif --output results.sarif \
+                --confidence-score --quiet
+            fi
+          # Parse and fail if secrets found
+          - python -c "
+            import json
+            data = json.load(open('results.sarif'))
+            runs = data.get('runs', [{}])
+            results = runs[0].get('results', []) if runs else []
+            print(f'Findings: {len(results)}')
+            if results:
+                print('FAIL: secrets detected')
+                exit(1)
+            print('PASS: clean')
+            "
+        artifacts:
+          - results.sarif
+
+pipelines:
+  pull-requests:
+    '**':
+      - step: *secret-scan
+  branches:
+    main:
+      - step: *secret-scan

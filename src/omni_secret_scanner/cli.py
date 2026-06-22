@@ -313,6 +313,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install a strict pre-commit hook (NLP + PowerShell)",
     )
     p.add_argument(
+        "--install-hook-push",
+        action="store_true",
+        help="Install a pre-push hook that scans new commits before pushing",
+    )
+    p.add_argument(
+        "--install-all-hooks",
+        action="store_true",
+        help="Install pre-commit + pre-push hooks in one command",
+    )
+    p.add_argument(
         "--print-tool-schema",
         action="store_true",
         help="Print OpenAI/Anthropic function-calling schema and exit",
@@ -566,7 +576,7 @@ def _install_hook(strict: bool = False) -> None:
     hook_content = (
         "#!/usr/bin/env bash\n"
         "echo 'Running omni-secret-scanner...'\n"
-        f"omni-scan{extra_args}\n"
+        f"omni-scan --fast{extra_args}\n"
         "if [ $? -ne 0 ]; then\n"
         "    echo 'Secrets or PII detected! Commit blocked.'\n"
         "    exit 1\n"
@@ -581,6 +591,54 @@ def _install_hook(strict: bool = False) -> None:
 
     mode = "Strict" if strict else "Standard"
     print(f"{mode} pre-commit hook installed at .git/hooks/pre-commit")
+
+
+def _install_pre_push_hook() -> None:
+    """Install a pre-push hook that scans new commits before they leave the machine."""
+    hook_path = Path(".git/hooks/pre-push")
+    if not Path(".git").exists():
+        print("Error: Must run from the root of a git repository to install hooks.")
+        sys.exit(1)
+
+    # This hook receives refs on stdin; it scans the diff between local and remote
+    hook_content = (
+        "#!/usr/bin/env bash\n"
+        "# Pre-push hook: scan new commits before pushing to remote\n"
+        "while read local_ref local_sha remote_ref remote_sha; do\n"
+        "    if [ \"$remote_sha\" = \"0000000000000000000000000000000000000000\" ]; then\n"
+        "        # New branch — scan all commits\n"
+        "        echo \"Scanning new branch...\"\n"
+        "        omni-scan --diff origin/main.. --fast --quiet\n"
+        "    else\n"
+        "        # Existing branch — scan only new commits\n"
+        "        echo \"Scanning commits $remote_sha..$local_sha...\"\n"
+        "        omni-scan --diff $remote_sha.. --fast --quiet\n"
+        "    fi\n"
+        "    if [ $? -ne 0 ]; then\n"
+        "        echo \"\"\n"
+        "        echo \"==========================================\"\n"
+        "        echo \"  SECRETS DETECTED — PUSH BLOCKED\"\n"
+        "        echo \"  Run: omni-scan --diff $remote_sha..\"\n"
+        "        echo \"  Fix: omni-scan --fix\"\n"
+        "        echo \"==========================================\"\n"
+        "        exit 1\n"
+        "    fi\n"
+        "done\n"
+    )
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text(hook_content, encoding="utf-8")
+    try:
+        hook_path.chmod(0o755)
+    except Exception:
+        pass
+    print("Pre-push hook installed at .git/hooks/pre-push")
+
+
+def _install_all_hooks(strict: bool = False) -> None:
+    """Install both pre-commit and pre-push hooks."""
+    _install_hook(strict=strict)
+    _install_pre_push_hook()
+    print("\nBoth hooks installed. Every commit and push will be scanned.")
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +696,14 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
 
     if args.install_hook or args.install_hook_strict:
         _install_hook(strict=args.install_hook_strict)
+        return 0
+
+    if args.install_hook_push:
+        _install_pre_push_hook()
+        return 0
+
+    if args.install_all_hooks:
+        _install_all_hooks(strict=args.install_hook_strict)
         return 0
 
     # ── Repository / working directory setup ────────────────────────────────

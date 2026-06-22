@@ -1,0 +1,63 @@
+# GitLab CI/CD template for omni-secret-scanner
+# Drop this into .gitlab-ci.yml or include it from your pipeline.
+
+variables:
+  OMNI_SCAN_VERSION: "9.0.0"
+
+# ------------------------------------------------------------------
+# Secret scan on every merge request
+# ------------------------------------------------------------------
+secret-scan:
+  stage: test
+  image: python:3.12-slim
+  before_script:
+    - pip install omni-secret-scanner==${OMNI_SCAN_VERSION}
+  script:
+    # Full scan: working tree + diff since target branch
+    - |
+      if [ -n "$CI_MERGE_REQUEST_DIFF_BASE_SHA" ]; then
+        omni-scan --diff $CI_MERGE_REQUEST_DIFF_BASE_SHA.. \
+          --format json --output scan-results.json \
+          --confidence-score --quiet
+      else
+        omni-scan --fast --format json --output scan-results.json \
+          --confidence-score --quiet
+      fi
+    # Parse results: fail if secrets found
+    - python -c "
+      import json
+      data = json.load(open('scan-results.json'))
+      issues = data['summary']['total_issues']
+      score = data['summary']['safety_score']
+      print(f'Issues: {issues}, Safety: {score}/100')
+      if issues > 0 or score < 90:
+          print('FAIL: secrets or low safety score')
+          exit(1)
+      print('PASS: clean scan')
+      "
+  artifacts:
+    paths:
+      - scan-results.json
+    when: always
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ------------------------------------------------------------------
+# Scheduled full-history scan (nightly)
+# ------------------------------------------------------------------
+secret-scan-full:
+  stage: test
+  image: python:3.12-slim
+  before_script:
+    - pip install omni-secret-scanner==${OMNI_SCAN_VERSION}
+  script:
+    - omni-scan --all-branches --reflog --semgrep
+      --format sarif --output full-scan.sarif
+      --validate  # check if found keys are live
+  artifacts:
+    paths:
+      - full-scan.sarif
+    when: always
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
