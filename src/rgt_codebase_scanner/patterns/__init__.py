@@ -10,7 +10,7 @@ from .lang_rules import (
     LANG_RULES_PYTHON,
     get_lang_rules_for_file,
 )
-from .pii import CUSTOM_PII_PATTERNS
+from .pii import CUSTOM_PII_PATTERNS, PII_IGNORE_VALUES
 from .secrets import CUSTOM_SECRET_PATTERNS, GITROB_CONTENT_PATTERNS, GITROB_SUSPICIOUS_FILES
 
 ALL_SECRET_PATTERNS: dict[str, str] = {

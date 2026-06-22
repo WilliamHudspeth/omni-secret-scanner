@@ -11,6 +11,7 @@ from typing import Any
 from ..patterns import (
     ALL_SECRET_PATTERNS,
     CUSTOM_PII_PATTERNS,
+    PII_IGNORE_VALUES,
     GITROB_SUSPICIOUS_FILES,
     INJECTION_PATTERNS,
     get_lang_rules_for_file,
@@ -97,14 +98,14 @@ def _run_pattern_scan(
             if _match_fn:
                 for m, _ in _match_fn(line, pattern):
                     val = m.group(0).strip()
-                    if val not in ignore_tokens:
+                    if val not in ignore_tokens and val not in PII_IGNORE_VALUES:
                         current_secrets.append(
                             {"type": f"PII:{name}", "file": file_rel_path, "line": line_no, "match": val}
                         )
             else:
                 for m in re.finditer(pattern, line):
                     val = m.group(0).strip()
-                    if val not in ignore_tokens:
+                    if val not in ignore_tokens and val not in PII_IGNORE_VALUES:
                         current_secrets.append(
                             {"type": f"PII:{name}", "file": file_rel_path, "line": line_no, "match": val}
                         )

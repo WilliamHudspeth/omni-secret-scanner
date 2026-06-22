@@ -752,8 +752,8 @@ def _run_validation(
     tree_findings: dict,
 ) -> list[dict]:
     """Run live API validation on found secrets. Returns validated_secrets list."""
-    from ..reporters.base import deduplicate_findings
-    from ..utils.validation import validate_secret
+    from .reporters.base import deduplicate_findings
+    from .utils.validation import validate_secret
 
     validated: list[dict] = []
     if not getattr(args, "validate", False):

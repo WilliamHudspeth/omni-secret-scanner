@@ -1,6 +1,15 @@
 # SPDX-License-Identifier: MIT
 """PII (Personally Identifiable Information) regex pattern library."""
 
+# Numeric constants that look like PII but are common code values
+# (iteration counts, timeouts in seconds, port numbers, threshold values)
+PII_IGNORE_VALUES: set[str] = {
+    "10000", "15000", "20000", "30000", "50000",
+    "32768", "65535", "65536",
+    "86400",  # seconds in a day
+    "99999",
+}
+
 CUSTOM_PII_PATTERNS: dict[str, str] = {
     "Email Address": r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
     "Phone Number (US)": r"\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}",
