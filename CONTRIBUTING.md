@@ -1,8 +1,6 @@
-# Contributing to omni-secret-scanner
+# Contributing to RGT Codebase Scanner
 
-Thank you for considering a contribution!
-
-## Quick start
+## Setup
 
 ```bash
 git clone https://github.com/williamhudspeth/omni-secret-scanner.git
@@ -14,55 +12,51 @@ pre-commit install
 ## Project layout
 
 ```
-src/omni_secret_scanner/
-├── __init__.py          # Public API + __version__
-├── cli.py               # Argument parser and main() entry point
+src/rgt_codebase_scanner/
+├── cli.py               # Argument parser and entry point
 ├── config/              # TOML config loader
 ├── detectors/           # All scanning engines
 │   ├── snippet.py       # In-memory text / file scanning
 │   ├── git_history.py   # Commit history scanning
-│   ├── file_tree.py     # Parallel working-tree scanner
-│   ├── semgrep.py       # Semgrep SAST integration
-│   ├── powershell.py    # PowerShell cross-check
-│   ├── nlp.py           # spaCy / Presidio NLP init helpers
-│   └── ast_filter.py    # tree-sitter false-positive filter
-├── patterns/            # Regex pattern dictionaries
+│   ├── file_tree.py     # Working-tree scanner
+│   ├── nlp.py           # spaCy / Presidio init helpers
+│   ├── ast_filter.py    # tree-sitter false-positive filter
+│   └── ...
+├── patterns/            # Regex pattern dicts
 ├── reporters/           # Output formatters (text/JSON/SARIF/HTML)
+├── targets/             # Scan target resolvers (path/url/docker/env/clipboard)
 ├── tui/                 # Interactive terminal UI
-└── utils/               # Shared helpers (entropy, git, redaction, validation)
+└── utils/               # Shared helpers
 ```
 
-## Running tests
+## Tests
 
 ```bash
 pytest tests/
 ```
 
-## Code style
-
-This project uses [ruff](https://docs.astral.sh/ruff/) for linting and formatting.
+## Style
 
 ```bash
 ruff check src/ tests/
 ruff format src/ tests/
+mypy src/rgt_codebase_scanner --ignore-missing-imports
 ```
 
-## Adding a new pattern
+## Adding a pattern
 
-1. Choose the right module in `src/omni_secret_scanner/patterns/`.
-2. Add the regex to the appropriate dict (e.g. `CUSTOM_SECRET_PATTERNS`).
-3. Write a test in `tests/test_patterns.py` with a synthetic example that must
-   trigger *and* a benign counter-example that must not.
+1. Add the regex to the right dict in `src/rgt_codebase_scanner/patterns/`.
+2. Write a test in `tests/` with a positive and a negative example.
+3. Update `CHANGELOG.md`.
 
-## Pull request checklist
+## PR checklist
 
 - [ ] `pytest tests/` passes
 - [ ] `ruff check` and `ruff format --check` pass
-- [ ] New patterns include both positive and negative test cases
-- [ ] `CHANGELOG.md` updated under `[Unreleased]`
+- [ ] New patterns include positive and negative test cases
+- [ ] `CHANGELOG.md` updated
 
-## Reporting bugs
+## Bug reports
 
-Open an issue at <https://github.com/williamhudspeth/omni-secret-scanner/issues>
-and include the relevant portion of `omni-scan --format json` output (with secrets
-redacted using `--mask`).
+Open an issue at <https://github.com/williamhudspeth/omni-secret-scanner/issues>.
+Include the relevant portion of `rgt-scan --format json` output with `--mask`.

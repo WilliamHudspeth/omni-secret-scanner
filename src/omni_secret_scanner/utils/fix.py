@@ -48,8 +48,10 @@ def redact_findings_in_files(
 
         if dry_run:
             if not quiet:
-                print(f"  [DRY RUN] Would redact {len(sensitive_words)} matches in {fpath}",
-                      file=sys.stderr)
+                print(
+                    f"  [DRY RUN] Would redact {len(sensitive_words)} matches in {fpath}",
+                    file=sys.stderr,
+                )
             modified.append(fpath)
             continue
 
@@ -62,8 +64,7 @@ def redact_findings_in_files(
             if success:
                 modified.append(fpath)
                 if not quiet:
-                    print(f"  Redacted {len(sensitive_words)} matches in {fpath}",
-                          file=sys.stderr)
+                    print(f"  Redacted {len(sensitive_words)} matches in {fpath}", file=sys.stderr)
         except Exception as e:
             if not quiet:
                 print(f"  Error redacting {fpath}: {e}", file=sys.stderr)
@@ -89,21 +90,22 @@ def stage_and_suggest_commit(
     try:
         subprocess.run(
             ["git", "add"] + modified_files,
-            cwd=repo_dir, capture_output=True, timeout=10,
+            cwd=repo_dir,
+            capture_output=True,
+            timeout=10,
         )
     except Exception:
         pass
 
     cmd = (
         'git commit -m "security: remove hardcoded secrets '
-        f'({len(modified_files)} files) '
+        f"({len(modified_files)} files) "
         '[omni-secret-scanner --fix]"'
     )
 
     if not quiet:
         print(f"\nStaged {len(modified_files)} files.", file=sys.stderr)
         print(f"Suggested commit:\n  {cmd}", file=sys.stderr)
-        print("\nBackups saved as .bak files. Review changes before committing!",
-              file=sys.stderr)
+        print("\nBackups saved as .bak files. Review changes before committing!", file=sys.stderr)
 
     return cmd

@@ -4,7 +4,7 @@
 import html as _html
 from datetime import datetime
 
-from .base import injection_risk_score, calculate_safety_score
+from .base import calculate_safety_score, injection_risk_score
 
 _VERSION = "9.0.0"
 
@@ -45,14 +45,16 @@ def generate_html_report(
             return '<tr><td colspan="100%" class="empty">None found.</td></tr>'
         rows = []
         for item in items:
-            cells = "".join(f'<td>{esc(redact_if(str(item.get(c, ""))))}</td>' for c in cols)
+            cells = "".join(f"<td>{esc(redact_if(str(item.get(c, ''))))}</td>" for c in cols)
             rows.append(f"<tr>{cells}</tr>")
         return "".join(rows)
 
-    def section(title: str, badge_count: int, badge_color: str, table_html: str, icon: str = "⚠") -> str:
+    def section(
+        title: str, badge_count: int, badge_color: str, table_html: str, icon: str = "⚠"
+    ) -> str:
         badge_cls = "badge-danger" if badge_count > 0 else "badge-ok"
         return (
-            f'<details {"open" if badge_count > 0 else ""}>'
+            f"<details {'open' if badge_count > 0 else ''}>"
             f'<summary>{icon} {esc(title)} <span class="badge {badge_cls}">{badge_count}</span></summary>'
             f'<div class="table-wrap">{table_html}</div></details>'
         )
@@ -67,39 +69,53 @@ def generate_html_report(
         rows = []
         for s in items:
             val = redact_if(s.get("match", s.get("token", "")))
-            loc = esc(str(s.get("commit", "?"))) if commit_mode else esc(f"{s.get('file','?')}:{s.get('line','?')}")
+            loc = (
+                esc(str(s.get("commit", "?")))
+                if commit_mode
+                else esc(f"{s.get('file', '?')}:{s.get('line', '?')}")
+            )
             rows.append(
-                f'<tr><td>{esc(s["type"])}</td><td>{loc}</td>'
+                f"<tr><td>{esc(s['type'])}</td><td>{loc}</td>"
                 f'<td class="mono copy-cell" title="Click to copy" onclick="copyText(this)">{esc(val)}</td></tr>'
             )
         return "".join(rows)
 
-    inj_rows = "".join(
-        f'<tr><td>{esc(inj["type"])}</td>'
-        f'<td>{esc(inj.get("file", inj.get("commit", "?")))}</td>'
-        f'<td>{esc(str(inj.get("line", "?")))}</td>'
-        f'<td class="mono copy-cell" onclick="copyText(this)">'
-        f'{esc(sanitize_if(inj.get("match", "")))}</td></tr>'
-        for inj in injection_findings
-    ) or '<tr><td colspan="4" class="empty">None found.</td></tr>'
+    inj_rows = (
+        "".join(
+            f"<tr><td>{esc(inj['type'])}</td>"
+            f"<td>{esc(inj.get('file', inj.get('commit', '?')))}</td>"
+            f"<td>{esc(str(inj.get('line', '?')))}</td>"
+            f'<td class="mono copy-cell" onclick="copyText(this)">'
+            f"{esc(sanitize_if(inj.get('match', '')))}</td></tr>"
+            for inj in injection_findings
+        )
+        or '<tr><td colspan="4" class="empty">None found.</td></tr>'
+    )
 
-    ps_rows = "".join(
-        f'<tr><td>{esc(p["Type"])}</td><td>{esc(p["File"])}</td>'
-        f'<td class="mono copy-cell" onclick="copyText(this)">{esc(redact_if(p["Match"]))}</td></tr>'
-        for p in ps_findings
-    ) or '<tr><td colspan="3" class="empty">None found.</td></tr>'
+    ps_rows = (
+        "".join(
+            f"<tr><td>{esc(p['Type'])}</td><td>{esc(p['File'])}</td>"
+            f'<td class="mono copy-cell" onclick="copyText(this)">{esc(redact_if(p["Match"]))}</td></tr>'
+            for p in ps_findings
+        )
+        or '<tr><td colspan="3" class="empty">None found.</td></tr>'
+    )
 
-    sg_rows = "".join(
-        f'<tr><td>{esc(s["rule"])}</td>'
-        f'<td>{esc("{}:{}".format(s.get("file","?"), s.get("line","?")))}</td>'
-        f'<td>{esc(s.get("severity",""))}</td>'
-        f'<td class="mono">{esc(s.get("message",""))}</td></tr>'
-        for s in semgrep_findings
-    ) or '<tr><td colspan="4" class="empty">None found.</td></tr>'
+    sg_rows = (
+        "".join(
+            f"<tr><td>{esc(s['rule'])}</td>"
+            f"<td>{esc('{}:{}'.format(s.get('file', '?'), s.get('line', '?')))}</td>"
+            f"<td>{esc(s.get('severity', ''))}</td>"
+            f'<td class="mono">{esc(s.get("message", ""))}</td></tr>'
+            for s in semgrep_findings
+        )
+        or '<tr><td colspan="4" class="empty">None found.</td></tr>'
+    )
 
-    susp_rows = "".join(
-        f"<tr><td>{esc(f)}</td></tr>" for f in tree_findings["suspicious_files"]
-    ) or '<tr><td class="empty">None found.</td></tr>'
+    susp_rows = (
+        "".join(f"<tr><td>{esc(f)}</td></tr>" for f in tree_findings["suspicious_files"])
+        or '<tr><td class="empty">None found.</td></tr>'
+    )
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     LOCK, PERSON, CHART, MEMO = "\U0001f510", "\U0001f464", "\U0001f4ca", "\U0001f4dd"
@@ -155,22 +171,22 @@ footer{{text-align:center;padding:2rem;color:var(--muted);font-size:.8rem;border
 <div class="container">
 <div class="score-grid">
   <div class="score-card"><div class="number" style="color:{esc(score_color)}">{score}</div><div class="label">Safety Score /100</div></div>
-  <div class="score-card"><div class="number" style="color:{'#ef4444' if total_secrets>0 else '#22c55e'}">{total_secrets}</div><div class="label">Secrets</div></div>
-  <div class="score-card"><div class="number" style="color:{'#f97316' if total_pii>0 else '#22c55e'}">{total_pii}</div><div class="label">PII</div></div>
-  <div class="score-card"><div class="number" style="color:{'#d29922' if total_entropy>0 else '#22c55e'}">{total_entropy}</div><div class="label">Entropy Strings</div></div>
+  <div class="score-card"><div class="number" style="color:{"#ef4444" if total_secrets > 0 else "#22c55e"}">{total_secrets}</div><div class="label">Secrets</div></div>
+  <div class="score-card"><div class="number" style="color:{"#f97316" if total_pii > 0 else "#22c55e"}">{total_pii}</div><div class="label">PII</div></div>
+  <div class="score-card"><div class="number" style="color:{"#d29922" if total_entropy > 0 else "#22c55e"}">{total_entropy}</div><div class="label">Entropy Strings</div></div>
   <div class="score-card"><div class="number" style="color:{esc(inj_color)}">{inj_risk}</div><div class="label">Injection Risk /100</div></div>
-  <div class="score-card"><div class="number" style="color:{'#bc8cff' if total_semgrep>0 else '#22c55e'}">{total_semgrep}</div><div class="label">SAST Issues</div></div>
+  <div class="score-card"><div class="number" style="color:{"#bc8cff" if total_semgrep > 0 else "#22c55e"}">{total_semgrep}</div><div class="label">SAST Issues</div></div>
 </div>
-{section("History – Secrets & Credentials", len(history_findings["secrets"]), "#ef4444", table(["Type","Location","Match"], secret_rows(history_findings["secrets"])), LOCK)}
-{section("History – PII", len(history_findings["pii"]), "#f97316", table(["Type","Location","Match"], secret_rows(history_findings["pii"])), PERSON)}
-{section("History – High-Entropy Strings", len(history_findings["entropy"]), "#d29922", table(["Type","Location","Token"], secret_rows(history_findings["entropy"])), CHART)}
-{section("History – Suspicious Commit Messages", len(history_findings["commits"]), "#f97316", table(["Type","Commit","Match"], secret_rows(history_findings["commits"], commit_mode=True)), MEMO)}
+{section("History – Secrets & Credentials", len(history_findings["secrets"]), "#ef4444", table(["Type", "Location", "Match"], secret_rows(history_findings["secrets"])), LOCK)}
+{section("History – PII", len(history_findings["pii"]), "#f97316", table(["Type", "Location", "Match"], secret_rows(history_findings["pii"])), PERSON)}
+{section("History – High-Entropy Strings", len(history_findings["entropy"]), "#d29922", table(["Type", "Location", "Token"], secret_rows(history_findings["entropy"])), CHART)}
+{section("History – Suspicious Commit Messages", len(history_findings["commits"]), "#f97316", table(["Type", "Commit", "Match"], secret_rows(history_findings["commits"], commit_mode=True)), MEMO)}
 {section("Current Tree – Suspicious Filenames", len(tree_findings["suspicious_files"]), "#d29922", table(["File"], susp_rows), FOLDER)}
-{section("Current Tree – Secrets & PII", len(tree_findings["current_secrets"]), "#ef4444", table(["Type","Location","Match"], secret_rows(tree_findings["current_secrets"])), SIREN)}
-{section("Current Tree – NLP PII", len(tree_findings["nlp_pii"]), "#f97316", table(["Type","Location","Match"], secret_rows(tree_findings["nlp_pii"])), BRAIN)}
-{section("PowerShell Cross-Check", len(ps_findings), "#f97316", table(["Type","File","Match"], ps_rows), DESKTOP)}
-{section("Semgrep SAST", len(semgrep_findings), "#bc8cff", table(["Rule","Location","Severity","Message"], sg_rows), MAG)}
-{section("Prompt Injection Detections", len(injection_findings), "#bc8cff", table(["Type","Location","Line","Match"], inj_rows), SKULL)}
+{section("Current Tree – Secrets & PII", len(tree_findings["current_secrets"]), "#ef4444", table(["Type", "Location", "Match"], secret_rows(tree_findings["current_secrets"])), SIREN)}
+{section("Current Tree – NLP PII", len(tree_findings["nlp_pii"]), "#f97316", table(["Type", "Location", "Match"], secret_rows(tree_findings["nlp_pii"])), BRAIN)}
+{section("PowerShell Cross-Check", len(ps_findings), "#f97316", table(["Type", "File", "Match"], ps_rows), DESKTOP)}
+{section("Semgrep SAST", len(semgrep_findings), "#bc8cff", table(["Rule", "Location", "Severity", "Message"], sg_rows), MAG)}
+{section("Prompt Injection Detections", len(injection_findings), "#bc8cff", table(["Type", "Location", "Line", "Match"], inj_rows), SKULL)}
 </div>
 <footer>Generated by <strong>omni-secret-scanner v{_VERSION}</strong> &mdash; {now}</footer>
 <script>

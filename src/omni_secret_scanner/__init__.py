@@ -1,25 +1,13 @@
 # SPDX-License-Identifier: MIT
-"""omni-secret-scanner — enterprise secret, PII, and injection scanner."""
+"""Backward-compatibility shim. Use rgt_codebase_scanner directly."""
 
-__version__ = "9.0.0"
-__author__ = "omni-secret-scanner contributors"
-__license__ = "MIT"
-
-from .detectors import (
-    scan_snippet,
-    scan_text,
-    scan_history,
-    scan_current_tree,
-    run_semgrep_scan,
+from rgt_codebase_scanner import *  # noqa: F401, F403
+from rgt_codebase_scanner import (  # noqa: F401
+    __author__ as __author__,
 )
-from .reporters import generate_report
-
-__all__ = [
-    "__version__",
-    "scan_snippet",
-    "scan_text",
-    "scan_history",
-    "scan_current_tree",
-    "run_semgrep_scan",
-    "generate_report",
-]
+from rgt_codebase_scanner import (
+    __license__ as __license__,
+)
+from rgt_codebase_scanner import (
+    __version__ as __version__,
+)

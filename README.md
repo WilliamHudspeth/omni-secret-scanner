@@ -1,92 +1,181 @@
-# 🔒 omni-secret-scanner
+# RGT Codebase Scanner
 
-A unified, production-grade Git repository secret scanner that combines 9 distinct detection strategies into a single zero-dependency Python script.
+Part of the RGT suite.
 
-![omni-secret-scanner v9.0.0](https://img.shields.io/badge/version-v9.0.0-blue)
-![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-green)
-![License: MIT](https://img.shields.io/badge/license-MIT-purple)
+Scans codebases, files, URLs, Docker images, and environment variables for secrets, PII, high-entropy tokens, and prompt injection.
 
-## 🌟 Features
+---
 
-**omni-secret-scanner** is uniquely designed to catch standard API keys, AI-specific keys, PII, and prompt-injections simultaneously:
+## Install
 
-1. **Deep History Scanning**: Automatically parses `git log -p`, reflogs, and stashes to find secrets that were committed and subsequently deleted or force-pushed over.
-2. **AI & LLM Keys**: Tailored to catch AI provider secrets (OpenAI, Anthropic, Gemini, Groq, LangChain, LiteLLM) and deeply parses `.ipynb` / `.pbix` notebooks.
-3. **Prompt Injection Detection**: Built-in AST-level tracking for prompt injections (e.g. "ignore previous instructions") to protect your LLM pipelines.
-4. **NLP PII Detection**: Context-aware detection for Names and Pronouns via spaCy & Microsoft Presidio, plus regex engines for global IDs, emails, and SSNs.
-5. **Shannon Entropy Analysis**: Mathematically identifies highly random strings (>16 chars) that might be unknown cryptographic keys.
-6. **OS-Native Cross-Check**: Uses native PowerShell regex engines on Windows for extreme accuracy.
-7. **Semgrep SAST Integration**: Merges AST-level static analysis for 30+ programming languages.
-8. **Interactive Terminal UI (TUI)**: Beautiful arrow-key navigation menu to review secrets.
-9. **Dark-Mode HTML Reports**: Generate self-contained beautiful audit reports (`--format html`).
-
-## 🚀 Quick Start
-
-The scanner is completely self-contained in a single file (`scan-secrets.py`)! You do not need to install any external dependencies unless you want optional power-ups (like `tqdm`, `semgrep`, or `spacy`).
-
-### Basic Scan
 ```bash
-# Scan the current directory
-python scan-secrets.py --repo-dir .
+# Quick scan — stdlib only, no extras required
+pip install rgt-codebase-scanner
 
-# Scan another directory and output a JSON report
-python scan-secrets.py --repo-dir /path/to/repo --format json
+# Full scan — all detectors
+pip install "rgt-codebase-scanner[all]"
 ```
 
-### Pre-commit CI Usage (Fast Mode)
+---
+
+## Quick Start
+
 ```bash
-# Skips deep history and heavy NLP to run in milliseconds
-python scan-secrets.py --fast
+# Scan current repo (secrets + PII)
+rgt-scan
 
-# Only scan lines changed vs a specific branch
-python scan-secrets.py --diff main
+# Scan a directory
+rgt-scan --target-type path /path/to/dir
+
+# Scan a URL
+rgt-scan --target-type url https://pastebin.com/raw/abc123
+
+# JSON output
+rgt-scan --format json --output findings.json
+
+# Interactive mode picker (TUI)
+rgt-scan --interactive
 ```
 
-### Interactive TUI Mode
+---
+
+## Scan Modes
+
+| Mode | Deps | Description |
+|------|------|-------------|
+| Quick | none | Secrets, PII, entropy, git history. stdlib only. |
+| Full | `[all]` | Adds NLP/Presidio, AST, Semgrep, external tools, watch mode. |
+
+---
+
+## Scan Targets (`--target-type`)
+
+| Value | Description |
+|-------|-------------|
+| `repo` | Local git repo (default) |
+| `path` | File or directory tree |
+| `url` | Fetch raw content from URL |
+| `docker` | Scan Docker image layers |
+| `env` | Scan current process environment variables |
+| `clipboard` | Read from system clipboard (requires `pyperclip`) |
+
+---
+
+## Detectors
+
+| Flag | Extra | What it finds |
+|------|-------|---------------|
+| _(always on)_ | none | Secrets, API keys, tokens via regex |
+| _(always on)_ | none | High-entropy strings |
+| `--pii` | none | Email, phone, SSN, IP, credit card via regex |
+| `--nlp` | `[nlp]` | Names, addresses via spaCy / text-deidentification |
+| `--presidio` | `[presidio]` | PII via Microsoft Presidio |
+| `--injection` | none | Prompt injection patterns |
+| `--semgrep` | semgrep CLI | SAST rules |
+| `--perplexity` | none | Low-perplexity (obfuscated) strings |
+| `--homoglyph` | none | Unicode lookalike characters |
+| `--taint` | none | Taint-flow analysis |
+| `--stego` | none | LSB steganography candidates |
+| `--gitleaks` | gitleaks CLI | External secret scanning |
+| `--trivy` | trivy CLI | Vulnerability + secret scanning |
+| `--watch` | `[all]` | Watch mode — re-scan on file change |
+
+---
+
+## Output Formats
+
 ```bash
-python scan-secrets.py --tui
+rgt-scan --format text    # default
+rgt-scan --format json    # machine-readable
+rgt-scan --format sarif   # SARIF 2.1.0 (GitHub Code Scanning)
+rgt-scan --format html    # standalone HTML report
 ```
 
-### Output to HTML Report
+---
+
+## Configuration
+
+`.omni-scan.toml` in the repo root (auto-detected):
+
+```toml
+[scanner]
+entropy_threshold = 4.5
+max_file_size_kb = 512
+fast = false
+mask = true
+
+[exclude]
+patterns = ["*.lock", "node_modules/"]
+tokens = ["EXAMPLE_TOKEN", "placeholder"]
+
+[custom_patterns]
+secrets = [
+  { name = "Internal API Key", pattern = "int_[A-Za-z0-9]{32}" }
+]
+
+[report]
+format = "json"
+output = "scan-results.json"
+```
+
+---
+
+## Pre-commit Hook
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/williamhudspeth/omni-secret-scanner
+    rev: v9.0.0
+    hooks:
+      - id: rgt-scan
+```
+
+---
+
+## Docker
+
 ```bash
-python scan-secrets.py --format html --output audit_report.html
+docker run --rm -v $(pwd):/repo ghcr.io/williamhudspeth/rgt-codebase-scanner:latest rgt-scan /repo
 ```
 
-## 🛠 Command Line Options
+---
 
-```text
---repo-dir DIR             Path to git repository (default: current dir)
---output FILE              Save report to file (default: stdout only)
---format FMT               Output format: text, json, sarif, html (default: text)
---tui                      Start the interactive terminal user interface
---fast                     Fast mode: skip history, NLP, Semgrep (pre-commit optimized)
---diff BASE                Incremental scan: scan only lines added since BASE ref
---scan-stash               Scan all git stash entries for secrets
---submodules               Scan submodules recursively in working tree and history
---all-branches             Scan all git branches and history
---reflog                   Scan git reflog for force-pushed commits
---since DATE               Incremental scan start commit/date (e.g. HEAD~3, 2026-06-01)
---max-file-size KB         Skip files larger than this size in KB (default: 1024)
---entropy-threshold NUM    Threshold for Shannon entropy (default: 3.8)
---nlp-pii                  Enable heavy NLP scanning for Names/Pronouns via spaCy
---presidio                 Enable Microsoft Presidio NLP scanning for PII
---ps-crosscheck            Enable PowerShell cross-checking for SSNs and common keys
---semgrep                  Enable Semgrep AST static analysis scanning
---sanitize                 Sanitize injection attack strings in report output
---mask                     Redact all matched secrets in output files/stdout
---redact-file FILE         Redact all secrets and PII from a local file in-place
---autofix-gitignore        Append flagged secret files to .gitignore (with backup)
---generate-filter-repo     Generate replacements.txt for git filter-repo
---install-hook             Install standard fast pre-commit hook
---print-tool-schema        Print OpenAI/Anthropic function-calling tool schema and exit
---self-test                Run built-in detection validation suite and exit
-```
+## LLM Integration
 
-## 🔌 Optional Requirements
-Install the power-ups via the provided `requirements.txt`:
 ```bash
-pip install -r requirements.txt
+# Print OpenAI/Anthropic function-calling schema
+rgt-scan --tool-schema
+
+# Self-test
+rgt-scan --self-test
 ```
 
-## 📄 License
-MIT License
+See `llms.txt` at the repo root for plain-text LLM instructions.
+
+---
+
+## CLI Reference
+
+```
+usage: rgt-scan [-h] [--target-type {repo,path,url,docker,env,clipboard}]
+                [--path PATH] [--branch BRANCH] [--all-branches]
+                [--entropy-threshold FLOAT] [--max-file-size-kb INT]
+                [--pii] [--nlp] [--presidio] [--injection] [--semgrep]
+                [--perplexity] [--homoglyph] [--taint] [--stego]
+                [--gitleaks] [--trivy] [--watch]
+                [--exclude PATTERN [PATTERN ...]]
+                [--exclude-token TOKEN [TOKEN ...]]
+                [--pattern-file FILE] [--config FILE]
+                [--format {text,json,sarif,html}] [--output FILE]
+                [--mask] [--sanitize] [--quiet] [--fast] [--progress]
+                [--context-lines INT] [--parallel] [--cache]
+                [--language LANG] [--interactive] [--menu]
+                [--tool-schema] [--self-test] [--version]
+```
+
+---
+
+## Legacy
+
+`omni-scan` is a registered alias for `rgt-scan`. `scan-secrets.py` still works as a shim.

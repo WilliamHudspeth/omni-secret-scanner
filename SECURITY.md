@@ -4,39 +4,33 @@
 
 | Version | Supported |
 |---------|-----------|
-| 9.x     | ✅ Yes    |
-| < 9.0   | ❌ No     |
+| 9.x     | Yes       |
+| < 9.0   | No        |
 
 ## Reporting a vulnerability
 
-**Please do not open a public GitHub issue for security vulnerabilities.**
+Do not open a public GitHub issue for security vulnerabilities.
 
-Email the maintainer at the address listed in `pyproject.toml` with:
+Email the maintainer listed in `pyproject.toml` with:
 
-1. A description of the vulnerability and its potential impact.
-2. Steps to reproduce (minimised test case preferred).
-3. Any known mitigations.
+1. Description of the vulnerability and potential impact.
+2. Steps to reproduce.
+3. Known mitigations.
 
 You will receive an acknowledgement within 72 hours. Confirmed vulnerabilities
-will be patched in a new patch release and disclosed publicly after a fix is
-available (coordinated disclosure).
+are patched in a new release and disclosed publicly after a fix is available.
 
 ## Threat model
 
-omni-secret-scanner processes arbitrary file content and git history. The key
-risks are:
+RGT Codebase Scanner processes arbitrary file content and git history.
 
-- **ReDoS**: Maliciously crafted input designed to cause catastrophic backtracking
-  in regex patterns. All patterns are reviewed for worst-case complexity.
-- **Command injection**: The scanner invokes `git`, `semgrep`, and (optionally)
-  PowerShell as subprocesses. Arguments are always passed as lists (never via
-  `shell=True`), preventing injection.
+- **ReDoS**: All regex patterns are reviewed for worst-case complexity.
+- **Command injection**: External tools (`git`, `semgrep`, etc.) are invoked
+  with argument lists, never via `shell=True`.
 - **Path traversal**: File paths from git output are sanitised before use.
-- **Malicious patterns file**: Loading patterns via `--patterns` executes no code
-  — only regex compilation. Invalid patterns are silently skipped.
+- **Malicious pattern files**: `--patterns` only compiles regexes; no code is
+  executed. Invalid patterns are skipped.
 
 ## Responsible use
 
-omni-secret-scanner is intended for authorised security testing of repositories
-you own or have explicit permission to audit. Do not use it against repositories
-without authorisation.
+Use only on repositories you own or have explicit permission to audit.

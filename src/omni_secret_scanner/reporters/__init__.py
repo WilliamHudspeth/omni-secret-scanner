@@ -6,14 +6,13 @@ from __future__ import annotations
 import copy
 import json
 import os
-import sys
 from datetime import datetime
-from typing import Optional
+from typing import Any
 
-from .base import deduplicate_findings, injection_risk_score, calculate_safety_score
-from .html import generate_html_report
-from ..utils.redaction import redact_match, sanitize_match
 from ..utils.git import get_context_snippet, is_git_ignored
+from ..utils.redaction import redact_match, sanitize_match
+from .base import calculate_safety_score, deduplicate_findings, injection_risk_score
+from .html import generate_html_report
 
 __all__ = [
     "generate_report",
@@ -51,8 +50,11 @@ def generate_self_correct_prompt(findings_list: list[dict], context_lines: int =
         fline = finding.get("line", "?")
         fmatch = finding.get("match", "")
         lines += [
-            "=" * 60, f"ISSUE #{i}: {ftype}", "=" * 60,
-            f"File: {ffile}  Line: {fline}", "",
+            "=" * 60,
+            f"ISSUE #{i}: {ftype}",
+            "=" * 60,
+            f"File: {ffile}  Line: {fline}",
+            "",
         ]
         if fmatch:
             lines.append("The following code contains a hardcoded secret:")
@@ -64,47 +66,69 @@ def generate_self_correct_prompt(findings_list: list[dict], context_lines: int =
                 lines.append(f"    (match: {fmatch})")
             lines.append("```")
         if "AWS" in ftype or "Key" in ftype or "Access" in ftype:
-            lines += ["Remediation: Use AWS Secrets Manager or environment variables.",
-                      "  import os", "  aws_key = os.environ.get('AWS_ACCESS_KEY_ID')"]
+            lines += [
+                "Remediation: Use AWS Secrets Manager or environment variables.",
+                "  import os",
+                "  aws_key = os.environ.get('AWS_ACCESS_KEY_ID')",
+            ]
         elif "GitHub" in ftype:
-            lines += ["Remediation: Use GitHub Actions secrets or a .env file.",
-                      "  import os", "  gh_token = os.environ.get('GITHUB_TOKEN')"]
+            lines += [
+                "Remediation: Use GitHub Actions secrets or a .env file.",
+                "  import os",
+                "  gh_token = os.environ.get('GITHUB_TOKEN')",
+            ]
         elif "API" in ftype or "Token" in ftype or "token" in ftype.lower():
-            lines += ["Remediation: Store this token in an environment variable.",
-                      "  import os", "  api_key = os.environ.get('API_KEY')"]
+            lines += [
+                "Remediation: Store this token in an environment variable.",
+                "  import os",
+                "  api_key = os.environ.get('API_KEY')",
+            ]
         elif "Password" in ftype or "password" in ftype.lower():
-            lines += ["Remediation: Never hardcode passwords. Use a vault or environment variable.",
-                      "  import os", "  db_pass = os.environ.get('DB_PASSWORD')"]
+            lines += [
+                "Remediation: Never hardcode passwords. Use a vault or environment variable.",
+                "  import os",
+                "  db_pass = os.environ.get('DB_PASSWORD')",
+            ]
         elif "PII" in ftype or "SSN" in ftype or "Email" in ftype:
-            lines += ["Remediation: Do not include PII in source code. Use test data or environment config.",
-                      "  Replace with placeholder: 'REDACTED_EMAIL' or '000-00-0000'"]
+            lines += [
+                "Remediation: Do not include PII in source code. Use test data or environment config.",
+                "  Replace with placeholder: 'REDACTED_EMAIL' or '000-00-0000'",
+            ]
         elif "Injection" in ftype:
-            lines += ["Remediation: Sanitize inputs and use allowlist validation.",
-                      "  Never pass raw user input to system prompts or exec()."]
+            lines += [
+                "Remediation: Sanitize inputs and use allowlist validation.",
+                "  Never pass raw user input to system prompts or exec().",
+            ]
         else:
-            lines += ["Remediation: Replace hardcoded value with environment variable or config file.",
-                      "  import os", "  secret = os.environ.get('SECRET')"]
+            lines += [
+                "Remediation: Replace hardcoded value with environment variable or config file.",
+                "  import os",
+                "  secret = os.environ.get('SECRET')",
+            ]
         lines += ["", "Do not include the original secret value in your response.", ""]
 
-    lines += ["=" * 60, f"Total issues: {len(findings_list)}",
-              "Please regenerate the affected files without exposing these secrets."]
+    lines += [
+        "=" * 60,
+        f"Total issues: {len(findings_list)}",
+        "Please regenerate the affected files without exposing these secrets.",
+    ]
     return "\n".join(lines)
 
 
 def generate_report(
-    history_findings: dict,
-    tree_findings: dict,
+    history_findings: dict[str, Any],
+    tree_findings: dict[str, Any],
     ps_findings: list,
-    output_file: Optional[str] = None,
+    output_file: str | None = None,
     output_format: str = "text",
     mask: bool = False,
     context_lines: int = 0,
     show_score: bool = False,
-    snippet_content: Optional[str] = None,
-    semgrep_findings: Optional[list] = None,
-    injection_findings: Optional[list] = None,
+    snippet_content: str | None = None,
+    semgrep_findings: list | None = None,
+    injection_findings: list | None = None,
     sanitize: bool = False,
-    validated_secrets: Optional[list] = None,
+    validated_secrets: list | None = None,
 ) -> int:
     """Generate a report in the requested format and return the total issue count."""
     if semgrep_findings is None:
@@ -117,10 +141,15 @@ def generate_report(
     has_secrets = bool(history_findings["secrets"] or tree_findings["current_secrets"])
     has_pii = bool(history_findings["pii"] or tree_findings["nlp_pii"] or ps_findings)
     total_issues = (
-        len(history_findings["secrets"]) + len(history_findings["pii"])
-        + len(history_findings["entropy"]) + len(history_findings["commits"])
-        + len(tree_findings["current_secrets"]) + len(tree_findings["nlp_pii"])
-        + len(ps_findings) + len(semgrep_findings) + len(injection_findings)
+        len(history_findings["secrets"])
+        + len(history_findings["pii"])
+        + len(history_findings["entropy"])
+        + len(history_findings["commits"])
+        + len(tree_findings["current_secrets"])
+        + len(tree_findings["nlp_pii"])
+        + len(ps_findings)
+        + len(semgrep_findings)
+        + len(injection_findings)
     )
     inj_risk = injection_risk_score(injection_findings)
 
@@ -132,21 +161,33 @@ def generate_report(
         sc = copy.deepcopy(semgrep_findings)
         ic = copy.deepcopy(injection_findings)
         if mask:
-            for s in hc["secrets"]: s["match"] = redact_match(s["match"])
-            for p in hc["pii"]: p["match"] = redact_match(p["match"])
-            for e in hc["entropy"]: e["token"] = redact_match(e["token"])
+            for s in hc["secrets"]:
+                s["match"] = redact_match(s["match"])
+            for p in hc["pii"]:
+                p["match"] = redact_match(p["match"])
+            for e in hc["entropy"]:
+                e["token"] = redact_match(e["token"])
             for c in hc["commits"]:
-                if "match" in c: c["match"] = redact_match(c["match"])
-                if "token" in c: c["token"] = redact_match(c["token"])
-            for s in tc["current_secrets"]: s["match"] = redact_match(s["match"])
-            for p in tc["nlp_pii"]: p["match"] = redact_match(p["match"])
-            for p in pc: p["Match"] = redact_match(p["Match"])
+                if "match" in c:
+                    c["match"] = redact_match(c["match"])
+                if "token" in c:
+                    c["token"] = redact_match(c["token"])
+            for s in tc["current_secrets"]:
+                s["match"] = redact_match(s["match"])
+            for p in tc["nlp_pii"]:
+                p["match"] = redact_match(p["match"])
+            for p in pc:
+                p["Match"] = redact_match(p["Match"])
             for s in sc:
-                if s.get("match"): s["match"] = redact_match(s["match"])
+                if s.get("match"):
+                    s["match"] = redact_match(s["match"])
         if sanitize:
-            for inj in ic: inj["match"] = sanitize_match(inj.get("match", ""))
+            for inj in ic:
+                inj["match"] = sanitize_match(inj.get("match", ""))
 
-        score = calculate_safety_score(history_findings, tree_findings, ps_findings, semgrep_findings)
+        score = calculate_safety_score(
+            history_findings, tree_findings, ps_findings, semgrep_findings
+        )
         report = {
             "scan_time": datetime.now().isoformat(),
             "summary": {
@@ -156,12 +197,19 @@ def generate_report(
                 "safety_score": score,
                 "injection_risk": inj_risk,
                 "validated": len(validated_secrets),
-                "valid_live": sum(1 for v in validated_secrets if v.get("valid") and v.get("checked")),
-                "invalid_live": sum(1 for v in validated_secrets if v.get("checked") and not v.get("valid")),
+                "valid_live": sum(
+                    1 for v in validated_secrets if v.get("valid") and v.get("checked")
+                ),
+                "invalid_live": sum(
+                    1 for v in validated_secrets if v.get("checked") and not v.get("valid")
+                ),
             },
             "findings": {
-                "history": hc, "current_tree": tc, "powershell_crosscheck": pc,
-                "semgrep_sast": sc, "injection_attacks": ic,
+                "history": hc,
+                "current_tree": tc,
+                "powershell_crosscheck": pc,
+                "semgrep_sast": sc,
+                "injection_attacks": ic,
                 "validated_secrets": copy.deepcopy(validated_secrets),
             },
         }
@@ -177,8 +225,13 @@ def generate_report(
     # ---- HTML ----------------------------------------------------------------
     if output_format == "html":
         html_out = generate_html_report(
-            history_findings, tree_findings, ps_findings,
-            semgrep_findings, injection_findings, mask=mask, sanitize=sanitize,
+            history_findings,
+            tree_findings,
+            ps_findings,
+            semgrep_findings,
+            injection_findings,
+            mask=mask,
+            sanitize=sanitize,
         )
         if output_file:
             with open(output_file, "w", encoding="utf-8") as f:
@@ -193,36 +246,50 @@ def generate_report(
         sarif = {
             "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
             "version": "2.1.0",
-            "runs": [{
-                "tool": {
-                    "driver": {
-                        "name": "omni-secret-scanner",
-                        "informationUri": "https://github.com/WilliamHudspeth/omni-secret-scanner",
-                        "rules": [
-                            {"id": "OSS001", "name": "SecretFound",
-                             "shortDescription": {"text": "A hardcoded secret was found."}},
-                            {"id": "OSS002", "name": "PIIFound",
-                             "shortDescription": {"text": "Personally Identifiable Information was found."}},
-                        ],
-                    }
-                },
-                "results": [],
-            }],
+            "runs": [
+                {
+                    "tool": {
+                        "driver": {
+                            "name": "omni-secret-scanner",
+                            "informationUri": "https://github.com/WilliamHudspeth/omni-secret-scanner",
+                            "rules": [
+                                {
+                                    "id": "OSS001",
+                                    "name": "SecretFound",
+                                    "shortDescription": {"text": "A hardcoded secret was found."},
+                                },
+                                {
+                                    "id": "OSS002",
+                                    "name": "PIIFound",
+                                    "shortDescription": {
+                                        "text": "Personally Identifiable Information was found."
+                                    },
+                                },
+                            ],
+                        }
+                    },
+                    "results": [],
+                }
+            ],
         }
         for s in tree_findings["current_secrets"]:
             match_str = redact_match(s["match"]) if mask else s["match"]
-            sarif["runs"][0]["results"].append({
-                "ruleId": "OSS002" if str(s["type"]).startswith("PII") else "OSS001",
-                "message": {"text": f"Found {s['type']} in current tree: {match_str}"},
-                "locations": [{"physicalLocation": {"artifactLocation": {"uri": s["file"]}}}],
-            })
+            sarif["runs"][0]["results"].append(  # type: ignore[index]
+                {
+                    "ruleId": "OSS002" if str(s["type"]).startswith("PII") else "OSS001",
+                    "message": {"text": f"Found {s['type']} in current tree: {match_str}"},
+                    "locations": [{"physicalLocation": {"artifactLocation": {"uri": s["file"]}}}],
+                }
+            )
         for s in history_findings["secrets"]:
             match_str = redact_match(s["match"]) if mask else s["match"]
-            sarif["runs"][0]["results"].append({
-                "ruleId": "OSS001",
-                "message": {"text": f"Found {s['type']} in git history: {match_str}"},
-                "locations": [{"physicalLocation": {"artifactLocation": {"uri": s["file"]}}}],
-            })
+            sarif["runs"][0]["results"].append(  # type: ignore[index]
+                {
+                    "ruleId": "OSS001",
+                    "message": {"text": f"Found {s['type']} in git history: {match_str}"},
+                    "locations": [{"physicalLocation": {"artifactLocation": {"uri": s["file"]}}}],
+                }
+            )
         json_out = json.dumps(sarif, indent=2)
         if output_file:
             with open(output_file, "w") as f:
@@ -249,7 +316,9 @@ def generate_report(
             m_val = redact_match(s["match"]) if mask else s["match"]
             w(f"[{s['type']}] {s['file']}:{s.get('line', '?')} -> {m_val}")
             if context_lines > 0 and s.get("line") and snippet_content:
-                ctx = get_context_snippet(s["file"], s["line"], context_lines, content=snippet_content)
+                ctx = get_context_snippet(
+                    s["file"], s["line"], context_lines, content=snippet_content
+                )
                 if ctx:
                     w(ctx.replace(s["match"], redact_match(s["match"])) if mask else ctx)
                     w()
@@ -321,7 +390,9 @@ def generate_report(
             if mask and m_val:
                 m_val = redact_match(m_val)
             m_preview = m_val.splitlines()[0].strip() if m_val else ""
-            w(f"[{s['rule']}] {s['file']}:{s.get('line', '?')} ({s.get('severity', 'warning')}) -> {s.get('message')}")
+            w(
+                f"[{s['rule']}] {s['file']}:{s.get('line', '?')} ({s.get('severity', 'warning')}) -> {s.get('message')}"
+            )
             if m_preview:
                 w(f"  Code: {m_preview}")
 
@@ -338,16 +409,24 @@ def generate_report(
         sec("SECRET VALIDATION RESULTS (LIVE API CHECKS)")
         live = sum(1 for v in validated_secrets if v.get("valid") and v.get("checked"))
         dead = sum(1 for v in validated_secrets if v.get("checked") and not v.get("valid"))
-        w(f"  Validated: {len(validated_secrets)} | [LIVE]={live} | [EXPIRED]={dead} | "
-          f"[UNCHECKED]={len(validated_secrets) - live - dead}")
+        w(
+            f"  Validated: {len(validated_secrets)} | [LIVE]={live} | [EXPIRED]={dead} | "
+            f"[UNCHECKED]={len(validated_secrets) - live - dead}"
+        )
         w()
         for v in validated_secrets:
-            m_val = redact_match(v.get("original_match", "")) if mask else v.get("original_match", "")
-            status = "[LIVE]" if (v.get("checked") and v.get("valid")) else (
-                "[EXPIRED]" if v.get("checked") else "[UNCHECKED]"
+            m_val = (
+                redact_match(v.get("original_match", "")) if mask else v.get("original_match", "")
             )
-            w(f"  {status} {v.get('original_type', '?')}: "
-              f"{v.get('original_file', '?')}:{v.get('original_line', '?')} -> {m_val}")
+            status = (
+                "[LIVE]"
+                if (v.get("checked") and v.get("valid"))
+                else ("[EXPIRED]" if v.get("checked") else "[UNCHECKED]")
+            )
+            w(
+                f"  {status} {v.get('original_type', '?')}: "
+                f"{v.get('original_file', '?')}:{v.get('original_line', '?')} -> {m_val}"
+            )
             if v.get("details"):
                 w(f"    Detail: {v['details']}")
 
@@ -359,13 +438,17 @@ def generate_report(
         sec("TAINT ANALYSIS — DATA FLOW TO SENSITIVE SINKS")
         high = sum(1 for t in taint_findings if t.get("exploitability") == "high")
         medium = sum(1 for t in taint_findings if t.get("exploitability") == "medium")
-        w(f"  Tainted secrets reaching sinks: {len(taint_findings)} | [HIGH]={high} | [MEDIUM]={medium}")
+        w(
+            f"  Tainted secrets reaching sinks: {len(taint_findings)} | [HIGH]={high} | [MEDIUM]={medium}"
+        )
         w()
         for t in taint_findings:
             m_val = redact_match(t.get("token", "")) if mask else t.get("token", "")
             sinks_str = ", ".join(t.get("sinks", [])[:3])
-            w(f"  [{t.get('exploitability', 'low').upper()}] {t.get('file', '?')}:{t.get('line', '?')} "
-              f"-> {m_val}")
+            w(
+                f"  [{t.get('exploitability', 'low').upper()}] {t.get('file', '?')}:{t.get('line', '?')} "
+                f"-> {m_val}"
+            )
             if sinks_str:
                 w(f"    Sinks: {sinks_str}")
             if t.get("tainted_vars"):
@@ -382,8 +465,10 @@ def generate_report(
         for s in stego_findings:
             conf = s.get("confidence", 0)
             conf_label = "HIGH" if conf >= 0.8 else ("MEDIUM" if conf >= 0.5 else "LOW")
-            w(f"  [{conf_label}] {s.get('file', '?')} "
-              f"(confidence: {conf:.2f}, RS ratio: {s.get('rs_ratio', 'N/A')})")
+            w(
+                f"  [{conf_label}] {s.get('file', '?')} "
+                f"(confidence: {conf:.2f}, RS ratio: {s.get('rs_ratio', 'N/A')})"
+            )
 
     gitignore_suggestions: list[str] = []
     files_to_check: set[str] = set(tree_findings["suspicious_files"])
@@ -391,34 +476,48 @@ def generate_report(
         files_to_check.add(s["file"])
     for p in tree_findings["nlp_pii"]:
         files_to_check.add(p["file"])
-    for f in sorted(files_to_check):
-        if os.path.exists(f) and not is_git_ignored(f):
-            if f not in ("scan-secrets.py", "report.json", "report.sarif", output_file):
-                gitignore_suggestions.append(f)
+    for fpath in sorted(files_to_check):
+        if os.path.exists(fpath) and not is_git_ignored(fpath):
+            if fpath not in ("scan-secrets.py", "report.json", "report.sarif", output_file):
+                gitignore_suggestions.append(fpath)
     if gitignore_suggestions:
         sec("RECOMMENDED .GITIGNORE ADDITIONS")
-        w("The following files contain secrets or have suspicious filenames, but are NOT ignored by Git:")
-        for f in gitignore_suggestions:
-            w(f"- {f}")
+        w(
+            "The following files contain secrets or have suspicious filenames, but are NOT ignored by Git:"
+        )
+        for fpath in gitignore_suggestions:
+            w(f"- {fpath}")
         w("\nHighly recommended: add these to .gitignore to prevent accidental leaks.")
 
     if show_score:
-        score = calculate_safety_score(history_findings, tree_findings, ps_findings, semgrep_findings)
+        score = calculate_safety_score(
+            history_findings, tree_findings, ps_findings, semgrep_findings
+        )
         risk_label = (
-            "GREEN (Safe to Share)" if score >= 90
-            else ("RED (High Risk - Do Not Share)" if score < 50
-                  else "YELLOW (Medium Risk - Inspect Before Sharing)")
+            "GREEN (Safe to Share)"
+            if score >= 90
+            else (
+                "RED (High Risk - Do Not Share)"
+                if score < 50
+                else "YELLOW (Medium Risk - Inspect Before Sharing)"
+            )
         )
         sec("SECURITY SUMMARY & SAFE-TO-SHARE SCORE")
         w(f"Confidence Score: {score}/100 - {risk_label}")
-        w(f"- Leaked Secrets: {len(history_findings['secrets']) + len(tree_findings['current_secrets'])}")
-        w(f"- PII Detections: {len(history_findings['pii']) + len(tree_findings['nlp_pii']) + len(ps_findings)}")
+        w(
+            f"- Leaked Secrets: {len(history_findings['secrets']) + len(tree_findings['current_secrets'])}"
+        )
+        w(
+            f"- PII Detections: {len(history_findings['pii']) + len(tree_findings['nlp_pii']) + len(ps_findings)}"
+        )
         w(f"- High Entropy Tokens: {len(history_findings['entropy'])}")
         w(f"- Semgrep SAST Issues: {len(semgrep_findings)}")
         w(f"- Injection Risk Score: {inj_risk}/100 ({len(injection_findings)} patterns detected)")
 
     sec("LLM REMEDIATION PROMPTS")
-    w("Use these prompts with ChatGPT/Claude/Gemini to help clean your repository based on our findings.\n")
+    w(
+        "Use these prompts with ChatGPT/Claude/Gemini to help clean your repository based on our findings.\n"
+    )
     if has_secrets:
         prompt = (
             "**For Credential Leaks:**\n"
@@ -431,11 +530,15 @@ def generate_report(
         )
         secret_records: list[str] = []
         for s in history_findings["secrets"]:
-            secret_records.append(f"- {s['type']} in {s['file']}:{s['line']} -> {redact_match(s['match'])}")
+            secret_records.append(
+                f"- {s['type']} in {s['file']}:{s['line']} -> {redact_match(s['match'])}"
+            )
         for s in tree_findings["current_secrets"]:
             if not s["type"].startswith("PII"):
                 line_str = f":{s['line']}" if "line" in s else ""
-                secret_records.append(f"- {s['type']} in {s['file']}{line_str} -> {redact_match(s['match'])}")
+                secret_records.append(
+                    f"- {s['type']} in {s['file']}{line_str} -> {redact_match(s['match'])}"
+                )
         for rec in sorted(set(secret_records)):
             prompt += f"{rec}\n"
         w(prompt)
@@ -448,7 +551,9 @@ def generate_report(
         )
         pii_records: list[str] = []
         for p in history_findings["pii"]:
-            pii_records.append(f"- {p['type']} in {p['file']}:{p['line']} -> {redact_match(p['match'])}")
+            pii_records.append(
+                f"- {p['type']} in {p['file']}:{p['line']} -> {redact_match(p['match'])}"
+            )
         for p in tree_findings["nlp_pii"]:
             pii_records.append(f"- {p['type']} in {p['file']} -> {redact_match(p['match'])}")
         for p in ps_findings:
@@ -458,15 +563,17 @@ def generate_report(
         w(prompt)
     if not has_secrets and not has_pii:
         w("**All Clear!**")
-        w("No credentials or PII were found! "
-          "To ask an LLM for general advice: "
-          "'How do I ensure my git repository remains free of secrets and PII in the future using pre-commit hooks?'")
+        w(
+            "No credentials or PII were found! "
+            "To ask an LLM for general advice: "
+            "'How do I ensure my git repository remains free of secrets and PII in the future using pre-commit hooks?'"
+        )
 
-    report = "\n".join(out)
-    print(report)
+    report_text = "\n".join(out)
+    print(report_text)
     if output_file:
-        with open(output_file, "w") as f:
-            f.write(report)
+        with open(output_file, "w") as fout:
+            fout.write(report_text)
         print(f"\nReport saved to {output_file}")
 
     return total_issues

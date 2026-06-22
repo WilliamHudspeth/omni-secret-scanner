@@ -7,15 +7,16 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-
 # ---------------------------------------------------------------------------
 # Low-level terminal helpers
 # ---------------------------------------------------------------------------
+
 
 def get_key() -> str:
     """Read a single keypress and return a normalised name."""
     if sys.platform == "win32":
         import msvcrt
+
         try:
             ch = msvcrt.getch()
         except KeyboardInterrupt:
@@ -85,6 +86,7 @@ def clear_screen() -> None:
 # Menu rendering
 # ---------------------------------------------------------------------------
 
+
 def menu_picker(title: str, options: list[str], selected_idx: int) -> None:
     clear_screen()
     print("\033[1;36m============================================================\033[0m")
@@ -103,14 +105,15 @@ def menu_picker(title: str, options: list[str], selected_idx: int) -> None:
 # Findings viewer
 # ---------------------------------------------------------------------------
 
+
 def view_findings_menu(
     findings: list[dict],
     state: dict,
     snippet_content: str | None = None,
 ) -> None:
     from ..reporters.base import injection_risk_score  # noqa: F401 (unused here)
-    from ..utils.redaction import redact_match
     from ..utils.git import get_context_snippet
+    from ..utils.redaction import redact_match
 
     if not findings:
         clear_screen()
@@ -121,11 +124,19 @@ def view_findings_menu(
 
     history_secrets_count = sum(1 for f in findings if f["category"] == "History Secret")
     tree_secrets_count = sum(1 for f in findings if f["category"] == "Tree Secret")
-    pii_count = sum(1 for f in findings if f["category"] in ("History PII", "NLP PII", "PS Crosscheck"))
+    pii_count = sum(
+        1 for f in findings if f["category"] in ("History PII", "NLP PII", "PS Crosscheck")
+    )
     entropy_count = sum(1 for f in findings if f["category"] == "History Entropy")
     semgrep_count = sum(1 for f in findings if f["category"] == "Semgrep SAST")
 
-    score = 100 - (history_secrets_count + tree_secrets_count) * 40 - pii_count * 20 - entropy_count * 10 - semgrep_count * 10
+    score = (
+        100
+        - (history_secrets_count + tree_secrets_count) * 40
+        - pii_count * 20
+        - entropy_count * 10
+        - semgrep_count * 10
+    )
     score = max(0, min(100, score))
 
     if score < 50:
@@ -149,7 +160,9 @@ def view_findings_menu(
             f"Detections: Secrets={history_secrets_count + tree_secrets_count} "
             f"PII={pii_count} High-Entropy={entropy_count} Semgrep={semgrep_count}\n"
         )
-        print("Use UP/DOWN arrow keys to navigate, R to generate filter-repo scrub commands, ESC/Q to return.\n")
+        print(
+            "Use UP/DOWN arrow keys to navigate, R to generate filter-repo scrub commands, ESC/Q to return.\n"
+        )
 
         if selected < scroll_offset:
             scroll_offset = selected
@@ -160,14 +173,18 @@ def view_findings_menu(
             f = findings[i]
             prefix = "--> " if i == selected else "    "
             mask_val = redact_match(f["match"]) if state["mask"] else f["match"]
-            display_line = f"{prefix}[{f['category']}: {f['type']}] {f['file']}:{f['line']} -> {mask_val}"
+            display_line = (
+                f"{prefix}[{f['category']}: {f['type']}] {f['file']}:{f['line']} -> {mask_val}"
+            )
             if i == selected:
                 print(f"\033[1;32m{display_line}\033[0m")
             else:
                 print(display_line)
 
         if len(findings) > page_size:
-            print(f"\n   [ Showing {scroll_offset + 1}-{min(len(findings), scroll_offset + page_size)} of {len(findings)} findings ]")
+            print(
+                f"\n   [ Showing {scroll_offset + 1}-{min(len(findings), scroll_offset + page_size)} of {len(findings)} findings ]"
+            )
 
         print("\033[1;36m------------------------------------------------------------\033[0m")
         print("\033[1mDETAILED FINDING VIEW\033[0m")
@@ -183,7 +200,9 @@ def view_findings_menu(
             print(f"Entropy:  {sel_f['entropy']}")
 
         if state["context_lines"] > 0 and sel_f["line"] != "?":
-            context = get_context_snippet(sel_f["file"], sel_f["line"], state["context_lines"], content=snippet_content)
+            context = get_context_snippet(
+                sel_f["file"], sel_f["line"], state["context_lines"], content=snippet_content
+            )
             if context:
                 if state["mask"]:
                     context = context.replace(sel_f["match"], redact_match(sel_f["match"]))
@@ -191,7 +210,9 @@ def view_findings_menu(
                 print(context)
 
         print("\nLLM Remediation Prompt Snippet:")
-        print(f"- {sel_f['type']} in {sel_f['file']}:{sel_f['line']} -> {redact_match(sel_f['match'])}")
+        print(
+            f"- {sel_f['type']} in {sel_f['file']}:{sel_f['line']} -> {redact_match(sel_f['match'])}"
+        )
 
         key = get_key()
         if key == "up":
@@ -248,6 +269,7 @@ def _generate_filter_repo_interactive(findings: list[dict]) -> None:
 # Settings menu
 # ---------------------------------------------------------------------------
 
+
 def configure_settings_menu(state: dict) -> None:
     selected = 0
     while True:
@@ -285,7 +307,9 @@ def _handle_settings_selection(selected: int, state: dict) -> None:
         state["mask"] = not state["mask"]
     elif selected == 1:
         clear_screen()
-        val = input(f"Enter new Entropy Threshold (current: {state['entropy_threshold']}): ").strip()
+        val = input(
+            f"Enter new Entropy Threshold (current: {state['entropy_threshold']}): "
+        ).strip()
         try:
             state["entropy_threshold"] = float(val)
         except ValueError:
@@ -313,7 +337,9 @@ def _handle_settings_selection(selected: int, state: dict) -> None:
     elif selected == 8:
         clear_screen()
         current = state["since"] or "(all)"
-        val = input(f"Enter new Since Limit (e.g. HEAD~3, 2026-06-01, empty for all; current: {current}): ").strip()
+        val = input(
+            f"Enter new Since Limit (e.g. HEAD~3, 2026-06-01, empty for all; current: {current}): "
+        ).strip()
         state["since"] = val if val else None
     elif selected == 9:
         state["submodules"] = not state.get("submodules", False)
@@ -327,11 +353,16 @@ def _handle_settings_selection(selected: int, state: dict) -> None:
 # Scan actions
 # ---------------------------------------------------------------------------
 
+
 def run_tui_repo_scan(state: dict) -> None:
     from ..detectors import (
-        scan_history, scan_reflog, scan_current_tree,
-        run_ps_crosscheck, run_semgrep_scan,
-        init_nlp_deidentifier, init_presidio_analyzer,
+        init_nlp_deidentifier,
+        init_presidio_analyzer,
+        run_ps_crosscheck,
+        run_semgrep_scan,
+        scan_current_tree,
+        scan_history,
+        scan_reflog,
     )
     from ..reporters.base import flatten_findings, injection_risk_score
     from ..utils.git import load_secretsignore
@@ -345,10 +376,29 @@ def run_tui_repo_scan(state: dict) -> None:
     ignore_files, ignore_tokens = load_secretsignore(state["repo_dir"])
 
     exclude_patterns = [
-        "*.lock", "*.svg", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.ico", "*.woff*",
-        "*.ttf", "*.eot", "*.min.js", "*.min.css", "package-lock.json", "*.sum",
-        ".gitignore", ".gitattributes", ".git/", "node_modules/", "vendor/", "dist/",
-        "build/", "__pycache__/", "*.pyc",
+        "*.lock",
+        "*.svg",
+        "*.png",
+        "*.jpg",
+        "*.jpeg",
+        "*.gif",
+        "*.ico",
+        "*.woff*",
+        "*.ttf",
+        "*.eot",
+        "*.min.js",
+        "*.min.css",
+        "package-lock.json",
+        "*.sum",
+        ".gitignore",
+        ".gitattributes",
+        ".git/",
+        "node_modules/",
+        "vendor/",
+        "dist/",
+        "build/",
+        "__pycache__/",
+        "*.pyc",
     ]
     exclude_patterns.extend(ignore_files)
 
@@ -369,18 +419,24 @@ def run_tui_repo_scan(state: dict) -> None:
 
     print("Scanning Git history...")
     history_findings = scan_history(
-        exclude_patterns, all_branches=False, quiet=True,
+        exclude_patterns,
+        all_branches=False,
+        quiet=True,
         entropy_threshold=state["entropy_threshold"],
-        ignore_tokens=ignore_tokens, sensitive_words=state["sensitive_words"],
-        since=state["since"], scan_submodules=state.get("submodules", False),
+        ignore_tokens=ignore_tokens,
+        sensitive_words=state["sensitive_words"],
+        since=state["since"],
+        scan_submodules=state.get("submodules", False),
     )
 
     if state["reflog"]:
         print("Scanning Git reflog history...")
         reflog_findings = scan_reflog(
-            exclude_patterns, quiet=True,
+            exclude_patterns,
+            quiet=True,
             entropy_threshold=state["entropy_threshold"],
-            ignore_tokens=ignore_tokens, sensitive_words=state["sensitive_words"],
+            ignore_tokens=ignore_tokens,
+            sensitive_words=state["sensitive_words"],
         )
         history_findings["secrets"].extend(reflog_findings["secrets"])
         history_findings["pii"].extend(reflog_findings["pii"])
@@ -389,8 +445,12 @@ def run_tui_repo_scan(state: dict) -> None:
 
     print("Scanning current files...")
     tree_findings = scan_current_tree(
-        state["repo_dir"], exclude_patterns, nlp_deidentifier, quiet=True,
-        ignore_tokens=ignore_tokens, sensitive_words=state["sensitive_words"],
+        state["repo_dir"],
+        exclude_patterns,
+        nlp_deidentifier,
+        quiet=True,
+        ignore_tokens=ignore_tokens,
+        sensitive_words=state["sensitive_words"],
         extract_code_blocks=state["extract_code_blocks"],
         scan_submodules=state.get("submodules", False),
         presidio_analyzer=presidio_analyzer,
@@ -401,19 +461,23 @@ def run_tui_repo_scan(state: dict) -> None:
         print("Running Semgrep AST Static Analysis...")
         semgrep_findings = run_semgrep_scan(state["repo_dir"], quiet=True)
 
-    injection_findings = (
-        history_findings.get("injections", []) + tree_findings.get("injections", [])
+    injection_findings = history_findings.get("injections", []) + tree_findings.get(
+        "injections", []
     )
     inj_risk = injection_risk_score(injection_findings)
 
     print("Compiling findings...")
-    findings = flatten_findings(history_findings, tree_findings, ps_findings, semgrep_findings=semgrep_findings)
+    findings = flatten_findings(
+        history_findings, tree_findings, ps_findings, semgrep_findings=semgrep_findings
+    )
 
     # Persist report for later loading
     try:
         score = 100
         score -= (len(history_findings["secrets"]) + len(tree_findings["current_secrets"])) * 40
-        score -= (len(history_findings["pii"]) + len(tree_findings["nlp_pii"]) + len(ps_findings)) * 20
+        score -= (
+            len(history_findings["pii"]) + len(tree_findings["nlp_pii"]) + len(ps_findings)
+        ) * 20
         score -= len(history_findings["entropy"]) * 10
         score -= len(semgrep_findings) * 10
         score = max(0, min(100, score))
@@ -422,7 +486,9 @@ def run_tui_repo_scan(state: dict) -> None:
             "scan_time": datetime.now().isoformat(),
             "summary": {
                 "total_issues": len(findings),
-                "has_secrets": bool(history_findings["secrets"] or tree_findings["current_secrets"]),
+                "has_secrets": bool(
+                    history_findings["secrets"] or tree_findings["current_secrets"]
+                ),
                 "has_pii": bool(history_findings["pii"] or tree_findings["nlp_pii"] or ps_findings),
                 "safety_score": score,
                 "injection_risk": inj_risk,
@@ -444,7 +510,7 @@ def run_tui_repo_scan(state: dict) -> None:
 
 
 def run_tui_snippet_scan(state: dict) -> None:
-    from ..detectors import scan_snippet, init_presidio_analyzer
+    from ..detectors import init_presidio_analyzer, scan_snippet
     from ..reporters.base import flatten_findings
     from ..utils.git import load_secretsignore
 
@@ -478,7 +544,8 @@ def run_tui_snippet_scan(state: dict) -> None:
 
     _, ignore_tokens = load_secretsignore(state["repo_dir"])
     snippet_findings = scan_snippet(
-        content, "text_snippet",
+        content,
+        "text_snippet",
         entropy_threshold=state["entropy_threshold"],
         ignore_tokens=ignore_tokens,
         extract_code_blocks=state["extract_code_blocks"],
@@ -492,7 +559,7 @@ def run_tui_snippet_scan(state: dict) -> None:
         "entropy": snippet_findings["entropy"],
         "commits": [],
     }
-    tree_findings = {"suspicious_files": [], "current_secrets": [], "nlp_pii": []}
+    tree_findings: dict[str, list] = {"suspicious_files": [], "current_secrets": [], "nlp_pii": []}
     findings = flatten_findings(history_findings, tree_findings, [])
     view_findings_menu(findings, state, snippet_content=content)
 
@@ -510,7 +577,7 @@ def run_tui_load_report(state: dict) -> None:
         return
 
     try:
-        with open(report_file, "r", encoding="utf-8") as fp:
+        with open(report_file, encoding="utf-8") as fp:
             report = json.load(fp)
 
         history_findings = report.get("findings", {}).get("history", {})
@@ -550,6 +617,7 @@ def run_tui_redact_file(state: dict) -> None:
 # ---------------------------------------------------------------------------
 # Main TUI entry point
 # ---------------------------------------------------------------------------
+
 
 def run_tui(args) -> None:
     """Launch the interactive TUI, initialised from parsed CLI *args*."""
