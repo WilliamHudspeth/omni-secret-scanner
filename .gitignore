@@ -3,6 +3,7 @@ __pycache__/
 report.txt
 scan_report.txt
 .env
+*.egg-info/
 
 # Omni-Secret-Scanner filter-repo replacements
 replacements.txt
