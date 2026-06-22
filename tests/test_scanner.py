@@ -1426,19 +1426,27 @@ def test_watchdog_importable():
 # 33. Phase 14 — LLM Triage Pipeline
 # ==============================================================================
 
-from omni_secret_scanner.llm.middleware import (
-    extract_all_findings, group_by_file, prune_findings,
-    classify_risk, build_stats,
+from omni_secret_scanner.llm.middleware import (  # noqa: E402
+    build_stats,
+    classify_risk,
+    extract_all_findings,
+    group_by_file,
+    prune_findings,
 )
-from omni_secret_scanner.llm.orchestrator import (
-    TriageOrchestrator, _deterministic_triage, create_provider,
+from omni_secret_scanner.llm.orchestrator import (  # noqa: E402
+    TriageOrchestrator,
+    _deterministic_triage,
+    create_provider,
 )
-from omni_secret_scanner.llm.prompts import (
-    build_file_prompt, build_summary_prompt, TRIAGE_SYSTEM_PROMPT,
+from omni_secret_scanner.llm.prompts import (  # noqa: E402
     EXPLOITABILITY_SYSTEM_PROMPT,
+    TRIAGE_SYSTEM_PROMPT,
+    build_file_prompt,
+    build_summary_prompt,
 )
-from omni_secret_scanner.llm.tools import (
-    get_tool_schema, execute_tool_call,
+from omni_secret_scanner.llm.tools import (  # noqa: E402
+    execute_tool_call,
+    get_tool_schema,
 )
 
 
@@ -1514,9 +1522,15 @@ class TestLLMPrompts:
         assert "HIGH" in prompt
 
     def test_build_summary_prompt(self):
-        stats = {"total_findings": 10, "files_affected": 3, "by_risk": {"high": 2},
-                 "safety_score": 50, "injection_risk": 20, "validated_live": 1,
-                 "validated_expired": 0}
+        stats = {
+            "total_findings": 10,
+            "files_affected": 3,
+            "by_risk": {"high": 2},
+            "safety_score": 50,
+            "injection_risk": 20,
+            "validated_live": 1,
+            "validated_expired": 0,
+        }
         prompt = build_summary_prompt(stats, [("a.py", "high", 5)])
         assert "10" in prompt
         assert "HIGH" in prompt
@@ -1557,12 +1571,76 @@ class TestLLMTools:
         assert "text" in schema["parameters"]["properties"]
 
     def test_execute_tool_call(self):
-        result = execute_tool_call("scan_secrets", {
-            "text": "key = 'AKIAIO...MPLE'"
-        })
+        result = execute_tool_call("scan_secrets", {"text": "key = 'AKIAIO...MPLE'"})
         assert "findings" in result
         assert "safety_score" in result
 
     def test_execute_unknown_tool(self):
         result = execute_tool_call("nonexistent", {})
         assert "error" in result
+
+
+# ==============================================================================
+# 34. Target Resolver + Config Fallback + TUI Mode Picker
+# ==============================================================================
+
+from rgt_codebase_scanner.targets.resolver import resolve_target  # noqa: E402
+
+
+class TestTargetResolver:
+    """Tests for resolve_target() across target types."""
+
+    def test_resolve_path_file(self, tmp_path):
+        f = tmp_path / "test.txt"
+        f.write_text("hello", encoding="utf-8")
+        results = list(resolve_target("path", str(f)))
+        assert results == [(str(f), b"hello")]
+
+    def test_resolve_path_dir(self, tmp_path):
+        (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+        results = list(resolve_target("path", str(tmp_path)))
+        assert len(results) >= 1
+
+    def test_resolve_env(self):
+        import os
+        os.environ["TEST_RGT_RESOLVER_KEY"] = "myvalue"
+        try:
+            results = dict(resolve_target("env", None))
+            assert "env:TEST_RGT_RESOLVER_KEY" in results
+            assert results["env:TEST_RGT_RESOLVER_KEY"] == b"myvalue"
+        finally:
+            del os.environ["TEST_RGT_RESOLVER_KEY"]
+
+    def test_resolve_path_missing(self, capsys):
+        list(resolve_target("path", "/nonexistent/path/xyz"))
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower() or "error" in captured.err.lower()
+
+
+class TestConfigFallback:
+    """Tests for .rgt-scan.toml → .omni-scan.toml fallback."""
+
+    def test_rgt_scan_toml_takes_priority(self, tmp_path):
+        (tmp_path / ".rgt-scan.toml").write_text("[scanner]\nmask = true\n")
+        cfg = load_toml_config(repo_dir=str(tmp_path))
+        assert cfg.get("mask") is True
+
+    def test_falls_back_to_omni_scan_toml(self, tmp_path):
+        (tmp_path / ".omni-scan.toml").write_text("[scanner]\nmask = true\n")
+        cfg = load_toml_config(repo_dir=str(tmp_path))
+        assert cfg.get("mask") is True
+
+    def test_rgt_takes_priority_over_omni(self, tmp_path):
+        (tmp_path / ".rgt-scan.toml").write_text("[scanner]\nmask = false\n")
+        (tmp_path / ".omni-scan.toml").write_text("[scanner]\nmask = true\n")
+        cfg = load_toml_config(repo_dir=str(tmp_path))
+        assert cfg.get("mask") is False  # .rgt-scan.toml wins
+
+    def test_no_config_found(self, tmp_path):
+        cfg = load_toml_config(repo_dir=str(tmp_path))
+        assert cfg == {}
+
+    def test_rgt_with_entropy_threshold(self, tmp_path):
+        (tmp_path / ".rgt-scan.toml").write_text("[scanner]\nentropy_threshold = 4.5\n")
+        cfg = load_toml_config(repo_dir=str(tmp_path))
+        assert cfg.get("entropy_threshold") == 4.5

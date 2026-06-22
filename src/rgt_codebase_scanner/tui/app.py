@@ -79,7 +79,7 @@ def get_key() -> str:
 
 
 def clear_screen() -> None:
-    os.system("cls" if os.name == "nt" else "clear")
+    print("\033[2J\033[H", end="", flush=True)
 
 
 # ---------------------------------------------------------------------------

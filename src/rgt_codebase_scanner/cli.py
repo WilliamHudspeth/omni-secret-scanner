@@ -62,6 +62,7 @@ _DEFAULT_EXCLUDE_PATTERNS = [
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build and return the rgt-scan argument parser."""
     p = argparse.ArgumentParser(
         prog="rgt-scan",
         description=f"rgt-codebase-scanner v{__version__} — enterprise secret, PII, and injection scanner",
@@ -321,6 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_self_test(quiet: bool = False) -> bool:
+    """Run built-in self-test cases. Return True if all pass."""
     from .detectors import scan_snippet
 
     passed = 0
@@ -356,6 +358,7 @@ def run_self_test(quiet: bool = False) -> bool:
 
 
 def print_tool_schema() -> None:
+    """Print OpenAI/Anthropic function-calling JSON schema to stdout."""
     schema = {
         "name": "scan_secrets",
         "description": (
@@ -574,17 +577,176 @@ def _install_hook(strict: bool = False) -> None:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intentional)
+def _run_history_scan(
+    args: argparse.Namespace,
+    exclude_patterns: list[str],
+    ignore_tokens: list[str],
+    sensitive_words: list[str],
+) -> dict:
+    """Run git history scan (diff, fast, or full) and return findings dict."""
+    from .detectors.git_history import scan_diff, scan_history, scan_reflog
+
+    diff_base = getattr(args, "diff", None)
+    fast_mode = getattr(args, "fast", False)
+
+    if diff_base:
+        if not args.quiet:
+            print(
+                f"Running incremental diff scan since '{diff_base}'...",
+                file=sys.stderr,
+            )
+        return scan_diff(
+            diff_base,
+            exclude_patterns,
+            quiet=args.quiet,
+            entropy_threshold=args.entropy_threshold,
+            ignore_tokens=ignore_tokens,
+            sensitive_words=sensitive_words,
+        )
+
+    if fast_mode:
+        return {
+            "secrets": [],
+            "pii": [],
+            "entropy": [],
+            "commits": [],
+            "injections": [],
+        }
+
+    findings = scan_history(
+        exclude_patterns,
+        args.all_branches,
+        quiet=args.quiet,
+        entropy_threshold=args.entropy_threshold,
+        ignore_tokens=ignore_tokens,
+        sensitive_words=sensitive_words,
+        since=args.since,
+        scan_submodules=args.submodules,
+    )
+    if args.reflog:
+        reflog = scan_reflog(
+            exclude_patterns,
+            quiet=args.quiet,
+            entropy_threshold=args.entropy_threshold,
+            ignore_tokens=ignore_tokens,
+            sensitive_words=sensitive_words,
+        )
+        for key in ("secrets", "pii", "entropy"):
+            findings[key].extend(reflog[key])
+        findings["injections"].extend(reflog.get("injections", []))
+    return findings
+
+
+def _run_tree_scan(
+    args: argparse.Namespace,
+    repo_dir: str,
+    exclude_patterns: list[str],
+    ignore_tokens: list[str],
+    sensitive_words: list[str],
+    nlp_deidentifier,
+    presidio_analyzer,
+    lang_rules_enabled: bool,
+    ast_filter_enabled: bool,
+    deconfuse_enabled: bool,
+    taint_enabled: bool,
+    stego_enabled: bool,
+    mmap_enabled: bool,
+    cache_enabled: bool,
+) -> dict:
+    """Run current-tree file scan and return findings dict."""
+    from .detectors.file_tree import scan_current_tree
+    from .patterns import ALL_SECRET_PATTERNS
+    from .patterns.combined import build_combined_pattern, build_name_map
+
+    fast_mode = getattr(args, "fast", False)
+    max_file_size_kb = getattr(args, "max_file_size", 1024)
+
+    combined_pattern = build_combined_pattern(ALL_SECRET_PATTERNS) if not fast_mode else None
+    name_map = build_name_map(ALL_SECRET_PATTERNS) if combined_pattern else {}
+
+    if cache_enabled:
+        from .utils.cache import ScanCache
+
+        scan_cache = ScanCache(repo_dir)
+        if not args.quiet:
+            stats = scan_cache.stats()
+            print(
+                f"Cache: {stats['total']} entries ({stats['recent_24h']} from last 24h)",
+                file=sys.stderr,
+            )
+
+    return scan_current_tree(
+        repo_dir,
+        exclude_patterns,
+        None if fast_mode else nlp_deidentifier,
+        quiet=args.quiet,
+        ignore_tokens=ignore_tokens,
+        sensitive_words=sensitive_words,
+        extract_code_blocks=args.extract_code_blocks,
+        scan_submodules=args.submodules,
+        presidio_analyzer=None if fast_mode else presidio_analyzer,
+        max_file_size_kb=max_file_size_kb,
+        lang_rules_enabled=lang_rules_enabled,
+        ast_filter_enabled=ast_filter_enabled,
+        deconfuse_enabled=deconfuse_enabled,
+        taint_enabled=taint_enabled,
+        stego_enabled=stego_enabled,
+        mmap_enabled=mmap_enabled,
+        combined_pattern=combined_pattern,
+        name_map=name_map,
+    )
+
+
+def _run_validation(
+    args: argparse.Namespace,
+    history_findings: dict,
+    tree_findings: dict,
+) -> list[dict]:
+    """Run live API validation on found secrets. Returns validated_secrets list."""
+    from ..reporters.base import deduplicate_findings
+    from ..utils.validation import validate_secret
+
+    validated: list[dict] = []
+    if not getattr(args, "validate", False):
+        return validated
+
+    all_secrets = deduplicate_findings(
+        history_findings.get("secrets", []) + tree_findings.get("current_secrets", []),
+        ("type", "match"),
+    )
+    if all_secrets and not args.quiet:
+        print(
+            f"Validating {len(all_secrets)} unique secrets against live APIs...",
+            file=sys.stderr,
+        )
+    for i, s in enumerate(all_secrets):
+        val_result = validate_secret(
+            s["type"],
+            s["match"],
+            timeout=args.validate_timeout,
+        )
+        val_result.update(
+            {
+                "original_type": s["type"],
+                "original_match": s["match"],
+                "original_file": s.get("file", ""),
+                "original_line": s.get("line", 0),
+            }
+        )
+        validated.append(val_result)
+        if i < len(all_secrets) - 1:
+            time.sleep(1)
+    return validated
+
+
+def main(argv: list[str] | None = None) -> int:  # noqa: C901
+    """Main entry point. Parse args and run the appropriate scan mode."""
     from .config.loader import load_external_patterns, load_toml_config
     from .detectors import (
         init_nlp_deidentifier,
         init_presidio_analyzer,
         run_ps_crosscheck,
         run_semgrep_scan,
-        scan_current_tree,
-        scan_diff,
-        scan_history,
-        scan_reflog,
         scan_snippet,
         scan_stash,
     )
@@ -595,7 +757,6 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     from .tui import run_tui
     from .utils.git import load_secretsignore
     from .utils.redaction import redact_file_in_place
-    from .utils.validation import validate_secret
 
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -855,52 +1016,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
         return 0
 
     # ── History scanning ─────────────────────────────────────────────────────
-    fast_mode = getattr(args, "fast", False)
-    diff_base = getattr(args, "diff", None)
-
-    if diff_base:
-        if not args.quiet:
-            print(f"Running incremental diff scan since '{diff_base}'...", file=sys.stderr)
-        history_findings = scan_diff(
-            diff_base,
-            exclude_patterns,
-            quiet=args.quiet,
-            entropy_threshold=args.entropy_threshold,
-            ignore_tokens=ignore_tokens,
-            sensitive_words=sensitive_words,
-        )
-    elif fast_mode:
-        history_findings = {
-            "secrets": [],
-            "pii": [],
-            "entropy": [],
-            "commits": [],
-            "injections": [],
-        }
-    else:
-        history_findings = scan_history(
-            exclude_patterns,
-            args.all_branches,
-            quiet=args.quiet,
-            entropy_threshold=args.entropy_threshold,
-            ignore_tokens=ignore_tokens,
-            sensitive_words=sensitive_words,
-            since=args.since,
-            scan_submodules=args.submodules,
-        )
-        if args.reflog:
-            reflog_findings = scan_reflog(
-                exclude_patterns,
-                quiet=args.quiet,
-                entropy_threshold=args.entropy_threshold,
-                ignore_tokens=ignore_tokens,
-                sensitive_words=sensitive_words,
-            )
-            history_findings["secrets"].extend(reflog_findings["secrets"])
-            history_findings["pii"].extend(reflog_findings["pii"])
-            history_findings["entropy"].extend(reflog_findings["entropy"])
-            history_findings["injections"].extend(reflog_findings.get("injections", []))
-
+    history_findings = _run_history_scan(
+        args,
+        exclude_patterns,
+        ignore_tokens,
+        sensitive_words,
+    )
     # Deduplicate history
     history_findings["secrets"] = deduplicate_findings(
         history_findings["secrets"], ("type", "file", "line", "match")
@@ -916,47 +1037,21 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
     )
 
     # ── Current tree scan ────────────────────────────────────────────────────
-    max_file_size_kb = getattr(args, "max_file_size", 1024)
-
-    # Build combined regex for faster single-pass matching
-    from rgt_codebase_scanner.patterns import ALL_SECRET_PATTERNS
-    from rgt_codebase_scanner.patterns.combined import build_combined_pattern, build_name_map
-
-    combined_pattern = build_combined_pattern(ALL_SECRET_PATTERNS) if not fast_mode else None
-    name_map = build_name_map(ALL_SECRET_PATTERNS) if combined_pattern else {}
-
-    # Initialize disk cache if enabled
-    scan_cache = None
-    if cache_enabled:
-        from rgt_codebase_scanner.utils.cache import ScanCache
-
-        scan_cache = ScanCache(repo_dir)
-        if not args.quiet:
-            stats = scan_cache.stats()
-            print(
-                f"Cache: {stats['total']} entries ({stats['recent_24h']} from last 24h)",
-                file=sys.stderr,
-            )
-
-    tree_findings = scan_current_tree(
+    tree_findings = _run_tree_scan(
+        args,
         repo_dir,
         exclude_patterns,
-        None if fast_mode else nlp_deidentifier,
-        quiet=args.quiet,
-        ignore_tokens=ignore_tokens,
-        sensitive_words=sensitive_words,
-        extract_code_blocks=args.extract_code_blocks,
-        scan_submodules=args.submodules,
-        presidio_analyzer=None if fast_mode else presidio_analyzer,
-        max_file_size_kb=max_file_size_kb,
-        lang_rules_enabled=lang_rules_enabled,
-        ast_filter_enabled=ast_filter_enabled,
-        deconfuse_enabled=deconfuse_enabled,
-        taint_enabled=taint_enabled,
-        stego_enabled=stego_enabled,
-        mmap_enabled=mmap_enabled,
-        combined_pattern=combined_pattern,
-        name_map=name_map,
+        ignore_tokens,
+        sensitive_words,
+        nlp_deidentifier,
+        presidio_analyzer,
+        lang_rules_enabled,
+        ast_filter_enabled,
+        deconfuse_enabled,
+        taint_enabled,
+        stego_enabled,
+        mmap_enabled,
+        cache_enabled,
     )
 
     # ── Stash scan ───────────────────────────────────────────────────────────
@@ -975,34 +1070,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901  (long but intenti
 
     # ── Semgrep ──────────────────────────────────────────────────────────────
     semgrep_findings: list[dict] = []
-    if args.semgrep and not fast_mode:
+    if args.semgrep and not getattr(args, "fast", False):
         semgrep_findings = run_semgrep_scan(repo_dir, quiet=args.quiet)
 
     # ── Live validation ──────────────────────────────────────────────────────
-    validated_secrets: list[dict] = []
-    if getattr(args, "validate", False):
-        all_secrets = deduplicate_findings(
-            history_findings.get("secrets", []) + tree_findings.get("current_secrets", []),
-            ("type", "match"),
-        )
-        if all_secrets and not args.quiet:
-            print(
-                f"Validating {len(all_secrets)} unique secrets against live APIs...",
-                file=sys.stderr,
-            )
-        for i, s in enumerate(all_secrets):
-            val_result = validate_secret(s["type"], s["match"], timeout=args.validate_timeout)
-            val_result.update(
-                {
-                    "original_type": s["type"],
-                    "original_match": s["match"],
-                    "original_file": s.get("file", ""),
-                    "original_line": s.get("line", 0),
-                }
-            )
-            validated_secrets.append(val_result)
-            if i < len(all_secrets) - 1:
-                time.sleep(1)  # rate-limit: 1 request per second
+    validated_secrets = _run_validation(args, history_findings, tree_findings)
 
     # ── Injection findings ───────────────────────────────────────────────────
     injection_findings = deduplicate_findings(
@@ -1219,6 +1291,7 @@ def _write_filter_repo(
 
 
 def entry_point() -> None:
+    """Setuptools console_scripts entry point."""
     sys.exit(main())
 
 
