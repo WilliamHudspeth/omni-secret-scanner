@@ -2,6 +2,7 @@
 """Tree-sitter AST context filtering to remove false positives in test/mock/comment code."""
 
 from pathlib import Path
+from typing import Any
 
 TREESITTER_LANG_MAP: dict[str, str] = {
     ".py": "python",
@@ -65,7 +66,7 @@ def _init_treesitter() -> bool:
         return False
 
 
-def _get_treesitter_parser(filepath: str):
+def _get_treesitter_parser(filepath: str) -> tuple[Any, Any] | tuple[None, None]:
     """Return (parser, language_obj) for *filepath*, or (None, None) on failure."""
     import os
 

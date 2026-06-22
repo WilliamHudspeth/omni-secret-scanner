@@ -68,8 +68,18 @@ def build_parser() -> argparse.ArgumentParser:
         description=f"rgt-codebase-scanner v{__version__} — enterprise secret, PII, and injection scanner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    _add_targeting_args(p)
+    _add_output_args(p)
+    _add_scope_args(p)
+    _add_detection_args(p)
+    _add_remediation_args(p)
+    _add_hooks_args(p)
+    _add_tui_args(p)
+    return p
 
-    # Targeting
+
+def _add_targeting_args(p: argparse.ArgumentParser) -> None:
+    """Add target selection arguments."""
     p.add_argument("--repo-dir", help="Path to git repository (default: current directory)")
     p.add_argument("--stdin", action="store_true", help="Scan content from standard input")
     p.add_argument("--text", help="Scan a text snippet passed as this argument")
@@ -86,7 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Target for --target-type (path/URL/image name; omit for env/clipboard)",
     )
 
-    # Output
+
+def _add_output_args(p: argparse.ArgumentParser) -> None:
+    """Add output format and display arguments."""
     p.add_argument("--output", "-o", help="Save report to file (default: stdout)")
     p.add_argument(
         "--format",
@@ -111,10 +123,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--confidence-score",
         action="store_true",
-        help="Print a 0–100 Safety Score in the text report",
+        help="Print a 0-100 Safety Score in the text report",
     )
 
-    # Scan scope
+
+def _add_scope_args(p: argparse.ArgumentParser) -> None:
+    """Add scan scope and performance arguments."""
     p.add_argument(
         "--all-branches", action="store_true", help="Scan all git branches, not just HEAD"
     )
@@ -139,8 +153,26 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="KB",
         help="Skip files larger than this size in KB (default: 1024)",
     )
+    p.add_argument(
+        "--parallel", action="store_true", help="Use multiprocessing for CPU-bound file scanning"
+    )
+    p.add_argument(
+        "--mmap", action="store_true", help="Use memory-mapped I/O for large files (>1MB)"
+    )
+    p.add_argument(
+        "--mmap-threshold",
+        type=int,
+        default=1_000_000,
+        metavar="BYTES",
+        help="Minimum file size for mmap (default: 1000000)",
+    )
+    p.add_argument(
+        "--cache", action="store_true", help="Use disk cache to skip unchanged files on re-scan"
+    )
 
-    # Detection
+
+def _add_detection_args(p: argparse.ArgumentParser) -> None:
+    """Add detection engine arguments."""
     p.add_argument(
         "--entropy-threshold",
         type=float,
@@ -202,22 +234,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Detect LSB steganography in image files via RS steganalysis",
     )
     p.add_argument(
-        "--parallel", action="store_true", help="Use multiprocessing for CPU-bound file scanning"
-    )
-    p.add_argument(
-        "--mmap", action="store_true", help="Use memory-mapped I/O for large files (>1MB)"
-    )
-    p.add_argument(
-        "--mmap-threshold",
-        type=int,
-        default=1_000_000,
-        metavar="BYTES",
-        help="Minimum file size for mmap (default: 1000000)",
-    )
-    p.add_argument(
-        "--cache", action="store_true", help="Use disk cache to skip unchanged files on re-scan"
-    )
-    p.add_argument(
         "--watch",
         action="store_true",
         help="Watch repo for file changes and re-scan modified files (requires watchdog)",
@@ -235,11 +251,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--audit-report", metavar="FILE", help="Generate a tamper-evident JSON audit report"
-    )
-    p.add_argument(
-        "--fix",
-        action="store_true",
-        help="Auto-redact all found secrets in-place and stage changed files",
     )
     p.add_argument(
         "--validate",
@@ -260,7 +271,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", metavar="FILE", help="TOML config file (default: auto-detect .rgt-scan.toml)"
     )
 
-    # Remediation
+
+def _add_remediation_args(p: argparse.ArgumentParser) -> None:
+    """Add remediation and fix arguments."""
     p.add_argument(
         "--generate-filter-repo",
         action="store_true",
@@ -289,8 +302,15 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="Generate an LLM remediation prompt (to stdout or FILE)",
     )
+    p.add_argument(
+        "--fix",
+        action="store_true",
+        help="Auto-redact all found secrets in-place and stage changed files",
+    )
 
-    # Hooks & tooling
+
+def _add_hooks_args(p: argparse.ArgumentParser) -> None:
+    """Add git hook and utility arguments."""
     p.add_argument(
         "--install-hook", action="store_true", help="Install a standard fast pre-commit hook"
     )
@@ -300,6 +320,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install a strict pre-commit hook (NLP + PowerShell)",
     )
     p.add_argument(
+        "--install-hook-push",
+        action="store_true",
+        help="Install a pre-push hook that scans new commits before pushing",
+    )
+    p.add_argument(
+        "--install-all-hooks",
+        action="store_true",
+        help="Install pre-commit + pre-push hooks in one command",
+    )
+    p.add_argument(
         "--print-tool-schema",
         action="store_true",
         help="Print OpenAI/Anthropic function-calling schema and exit",
@@ -307,13 +337,32 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--self-test", action="store_true", help="Run built-in detection validation suite and exit"
     )
+    p.add_argument(
+        "--profile",
+        action="store_true",
+        help="Profile repository: detect languages, frameworks, and recommend engines to skip",
+    )
+    p.add_argument(
+        "--pipeline",
+        metavar="FILE",
+        nargs="?",
+        const="auto",
+        help="Run full security analysis pipeline (DISCOVER to CORRELATE). Optional: output file.",
+    )
+    p.add_argument(
+        "--llm-triage",
+        metavar="FILE",
+        nargs="?",
+        const="auto",
+        help="Run LLM triage pipeline on scan results. Optional: path to existing scan JSON.",
+    )
 
-    # TUI
+
+def _add_tui_args(p: argparse.ArgumentParser) -> None:
+    """Add TUI argument."""
     p.add_argument(
         "--tui", action="store_true", help="Launch the interactive terminal user interface"
     )
-
-    return p
 
 
 # ---------------------------------------------------------------------------
